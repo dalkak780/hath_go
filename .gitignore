@@ -1,0 +1,24 @@
+# binaries
+/hath
+/bin/
+/dist/
+
+# data/runtime dirs (never commit account data or cache)
+/data/
+/cache/
+/log/
+/tmp/
+/download/
+*.p12
+
+# client login contains credentials
+client_login
+
+# go
+coverage.out
+*.test
+
+# editor/OS
+.DS_Store
+.idea/
+.vscode/
