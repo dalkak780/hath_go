@@ -5,6 +5,7 @@ cache/
 log/
 tmp/
 download/
+hath_java/
 *.p12
 client_login
 dist/
