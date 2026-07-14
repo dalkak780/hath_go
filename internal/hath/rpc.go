@@ -17,6 +17,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 // maxRPCMemory caps in-memory RPC text responses (mirrors the original 10MB).
@@ -393,8 +395,8 @@ func (h *ServerHandler) GetStaticRangeFetchURL(fileindex, xres, fileid string) [
 }
 
 // GetDownloaderFetchURL fetches a gallery download URL.
-func (h *ServerHandler) GetDownloaderFetchURL(gid, page int, fileindex, xres string, fileretry int) string {
-	add := fmt.Sprintf("%d;%d;%s;%s;%d", gid, page, fileindex, xres, fileretry)
+func (h *ServerHandler) GetDownloaderFetchURL(gid, page, fileindex int, xres string, fileretry int) string {
+	add := fmt.Sprintf("%d;%d;%d;%s;%d", gid, page, fileindex, xres, fileretry)
 	sr := h.callURL(h.queryURL(ActDownloaderFetch, add), "")
 	h.noteNull(sr)
 	if sr.Status == RespOK && len(sr.Lines) > 0 {
@@ -417,6 +419,116 @@ func (h *ServerHandler) ReportDownloaderFailures(failures []string) {
 // GetCertificate downloads the PKCS#12 cert to dest.
 func (h *ServerHandler) GetCertificate(dest string) error {
 	return h.fetchFile(h.queryURL(ActGetCertificate, ""), dest, 300*time.Second)
+}
+
+// FetchQueue hits the gallery download queue (/15/dl? act=fetchqueue). add is
+// "<gid>;<minxres>" when marking the previous gallery done, or "".
+func (h *ServerHandler) FetchQueue(add string) string {
+	t := h.settings.ServerTime()
+	key := actkey("fetchqueue", add, h.settings.ClientID, t, h.settings.ClientKey)
+	rawurl := ClientRPCProtocol + h.settings.RPCServerHost() + "/15/dl?" +
+		fmt.Sprintf("clientbuild=%d&act=fetchqueue&add=%s&cid=%d&acttime=%d&actkey=%s",
+			ClientBuild, add, h.settings.ClientID, t, key)
+	_, body, err := h.fetch(rawurl, 30*time.Second)
+	if err != nil {
+		return ""
+	}
+	return body
+}
+
+// originClient builds an HTTP client for fetching from origin servers / other
+// H@H nodes, honoring the optional image proxy (HTTP or SOCKS).
+func (h *ServerHandler) originClient(allowProxy bool) *http.Client {
+	c := &http.Client{Timeout: 5 * time.Minute}
+	if !allowProxy || h.settings.ImageProxyHost == "" {
+		return c
+	}
+	switch h.settings.ImageProxyType {
+	case "http", "https":
+		proxyURL, err := url.Parse(fmt.Sprintf("http://%s:%d", h.settings.ImageProxyHost, imageProxyPortOrDefault(h.settings)))
+		if err == nil {
+			c.Transport = &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+		}
+	case "socks":
+		dialer, err := proxy.SOCKS5("tcp", fmt.Sprintf("%s:%d", h.settings.ImageProxyHost, imageProxyPortOrDefault(h.settings)), nil, proxy.Direct)
+		if err == nil {
+			c.Transport = &http.Transport{Dial: dialer.Dial}
+		}
+	}
+	return c
+}
+
+func imageProxyPortOrDefault(s *Settings) int {
+	if s.ImageProxyPort != 0 {
+		return s.ImageProxyPort
+	}
+	if s.ImageProxyType == "http" {
+		return 8080
+	}
+	return 1080
+}
+
+// DownloadToFile fetches rawurl to dest (atomic temp+rename), enforcing size
+// caps and optional bandwidth limiting. Hath-Request is sent when isHath is
+// true (proxy fetches from other clients).
+func (h *ServerHandler) DownloadToFile(rawurl, dest string, timeout time.Duration, allowProxy, isHath bool, limiter *BandwidthMonitor, fileid string) (int64, error) {
+	cl := h.originClient(allowProxy)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawurl, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Connection", "close")
+	req.Header.Set("User-Agent", rpcUserAgent)
+	if isHath {
+		req.Header.Set("Hath-Request", fmt.Sprintf("%d-%s", h.settings.ClientID, sha1Hex(h.settings.ClientKey+fileid)))
+	}
+	resp, err := cl.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.ContentLength < 0 {
+		return 0, errors.New("missing Content-Length")
+	}
+	if resp.ContentLength > h.settings.MaxAllowedFile {
+		return 0, fmt.Errorf("file %d exceeds max %d", resp.ContentLength, h.settings.MaxAllowedFile)
+	}
+	tmp := dest + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return 0, err
+	}
+	var r io.Reader = resp.Body
+	if limiter != nil {
+		r = &limitReader{r: resp.Body, lim: limiter}
+	}
+	n, err := io.Copy(f, r)
+	f.Close()
+	if err != nil {
+		os.Remove(tmp)
+		return n, err
+	}
+	if resp.ContentLength > 0 && n != resp.ContentLength {
+		os.Remove(tmp)
+		return n, fmt.Errorf("short read: got %d want %d", n, resp.ContentLength)
+	}
+	return n, os.Rename(tmp, dest)
+}
+
+// limitReader applies BandwidthMonitor throttling to a read stream.
+type limitReader struct {
+	r   io.Reader
+	lim *BandwidthMonitor
+}
+
+func (l *limitReader) Read(p []byte) (int, error) {
+	n, err := l.r.Read(p)
+	if n > 0 {
+		l.lim.WaitForQuota(n)
+	}
+	return n, err
 }
 
 // --- helpers ---

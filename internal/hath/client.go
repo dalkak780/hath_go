@@ -24,6 +24,7 @@ type HathClient struct {
 	doCertRefresh  bool
 	counter        int
 	shutdown       bool
+	gallery        *GalleryDownloader
 }
 
 // NewHathClient builds a client with the given settings/stats.
@@ -61,7 +62,7 @@ func (c *HathClient) Run(ctx context.Context) error {
 	c.rpc.LoadClientSettingsFromServer()
 
 	c.stats.SetProgramStatus("Initializing cache handler...")
-	cache, err := NewCacheHandler(c.settings, c.stats)
+	cache, err := NewCacheHandler(c)
 	if err != nil {
 		return err
 	}
@@ -226,8 +227,26 @@ func (c *HathClient) doShutdown() {
 	if c.server != nil {
 		c.server.Shutdown()
 	}
+	if c.cache != nil && c.cache.pruner != nil {
+		c.cache.pruner.stop()
+	}
 	if c.cache != nil {
 		c.cache.TerminateCache()
+	}
+}
+
+// IsShuttingDown reports whether shutdown has been requested.
+func (c *HathClient) IsShuttingDown() bool { return c.shutdown }
+
+// IsSuspended reports whether the master thread is currently suspended.
+func (c *HathClient) IsSuspended() bool {
+	return !c.suspendedUntil.IsZero() && c.suspendedUntil.After(time.Now())
+}
+
+// StartDownloader launches the gallery downloader (servercmd start_downloader).
+func (c *HathClient) StartDownloader() {
+	if c.gallery == nil {
+		c.gallery = NewGalleryDownloader(c)
 	}
 }
 

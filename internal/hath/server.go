@@ -14,11 +14,11 @@ package hath
 import (
 	"crypto/rand"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -363,49 +363,70 @@ func (h *HTTPServer) serveCached(w http.ResponseWriter, r *http.Request, hvf *HV
 }
 
 // proxyFile fetches a missing file from a server-suggested origin, streams it
-// to the client, and caches the result.
+// to the client, and caches the verified result. When the origin is another
+// H@H node it is authenticated with the Hath-Request header.
 func (h *HTTPServer) proxyFile(w http.ResponseWriter, r *http.Request, hvf *HVFile, fileindex, xres, fileid string) {
 	sources := h.rpc.GetStaticRangeFetchURL(fileindex, xres, fileid)
 	if len(sources) == 0 {
 		h.empty(w, http.StatusNotFound)
 		return
 	}
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Get(sources[0])
-	if err != nil || resp.StatusCode != 200 {
-		if resp != nil {
-			resp.Body.Close()
-		}
-		h.empty(w, http.StatusNotFound)
+	// fetch to a temp file first so we can verify SHA-1 before serving+importing
+	tmp, err := os.CreateTemp(h.settings.TempDir, "proxyfile_")
+	if err != nil {
+		h.empty(w, http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	tmpPath := tmp.Name()
+	tmp.Close()
+
+	// try sources in order until one yields the right length
+	var n int64
+	var chosen string
+	for _, src := range sources {
+		got, err := h.rpc.DownloadToFile(src, tmpPath, 60*time.Second, false, true, nil, fileid)
+		if err == nil && got == hvf.Size {
+			n = got
+			chosen = src
+			break
+		}
+	}
+	if chosen == "" {
+		os.Remove(tmpPath)
+		h.empty(w, http.StatusBadGateway)
+		return
+	}
+
+	// verify integrity before exposing to the client
+	if !validateFileSHA1(tmpPath, hvf.Hash) {
+		os.Remove(tmpPath)
+		Warn("proxy download corrupt; not serving", "fileid", fileid)
+		h.empty(w, http.StatusBadGateway)
+		return
+	}
+
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		h.empty(w, http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
 
 	w.Header().Set("Content-Type", hvf.Mime())
 	w.Header().Set("Cache-Control", "public, max-age=31536000")
-	if resp.ContentLength > 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(resp.ContentLength, 10))
-	}
+	w.Header().Set("Content-Length", strconv.FormatInt(n, 10))
 	w.WriteHeader(http.StatusOK)
-	if r.Method == http.MethodHead {
-		return
+	if r.Method != http.MethodHead {
+		io.Copy(w, f)
 	}
-	tmp, err := os.CreateTemp(h.settings.TempDir, "pcache_")
-	var mw io.Writer = w
-	if err == nil {
-		mw = io.MultiWriter(w, tmp)
+	// import verified copy into the cache (best-effort)
+	if h.cache.ImportFileToCache(tmpPath, hvf) {
+		Debug("proxy file imported to cache", "fileid", fileid)
+	} else {
+		os.Remove(tmpPath)
 	}
-	got, _ := io.Copy(mw, resp.Body)
-	if tmp != nil {
-		tmp.Close()
-		if got == hvf.Size {
-			os.MkdirAll(filepath.Dir(h.cache.LocalPath(hvf)), 0o755)
-			os.Rename(tmp.Name(), h.cache.LocalPath(hvf))
-		} else {
-			os.Remove(tmp.Name())
-		}
-	}
-	Info("proxied", "code", 200, "bytes", got, "path", r.RequestURI)
+	_ = chosen
+	Info("proxied", "code", 200, "bytes", n, "path", r.RequestURI)
 }
 
 // handleServerCmd serves /servercmd/{cmd}/{add}/{time}/{key}.
@@ -445,8 +466,14 @@ func (h *HTTPServer) handleServerCmd(w http.ResponseWriter, r *http.Request, seg
 		if h.client != nil {
 			h.client.TriggerCertRefresh()
 		}
+	case "start_downloader":
+		if h.client != nil {
+			h.client.StartDownloader()
+		}
+	case "threaded_proxy_test":
+		h.runThreadedProxyTest(w, add)
 	case "speed_test":
-		// server-initiated speedtest response; full impl deferred
+		// server-initiated speedtest; full outbound test is threaded_proxy_test
 	default:
 		w.Write([]byte("INVALID_COMMAND"))
 	}
@@ -529,4 +556,62 @@ func abs64(x int64) int64 {
 		return -x
 	}
 	return x
+}
+
+// runThreadedProxyTest runs N concurrent /t fetches against another H@H node and
+// reports success count + total time. Matches the original OK:<n>-<ms> format.
+func (h *HTTPServer) runThreadedProxyTest(w http.ResponseWriter, add string) {
+	a := parseAdditional(add)
+	hostname := a["hostname"]
+	protocol := a["protocol"]
+	if protocol == "" {
+		protocol = "http"
+	}
+	port := a["port"]
+	testsize := a["testsize"]
+	testcount := atoi(a["testcount"])
+	testtime := a["testtime"]
+	testkey := a["testkey"]
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		success int
+		total   int64
+	)
+	for i := 0; i < testcount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			url := fmt.Sprintf("%s://%s:%s/t/%s/%s/%s/%d", protocol, hostname, port, testsize, testtime, testkey, randInt31())
+			start := time.Now()
+			resp, err := client.Get(url)
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+			io.Copy(io.Discard, resp.Body)
+			if resp.ContentLength > 0 && resp.ContentLength >= parseLen(testsize) {
+				mu.Lock()
+				success++
+				total += time.Since(start).Milliseconds()
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	Debug("ran threaded proxy test", "hostname", hostname, "success", success, "totalMs", total)
+	w.Write([]byte(fmt.Sprintf("OK:%d-%d", success, total)))
+}
+
+func randInt31() int32 {
+	var b [4]byte
+	rand.Read(b[:])
+	return int32(uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3]))
+}
+
+func parseLen(s string) int64 {
+	n, _ := strconv.ParseInt(s, 10, 64)
+	return n
 }

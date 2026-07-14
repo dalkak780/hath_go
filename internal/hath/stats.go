@@ -73,6 +73,12 @@ func (s *Stats) FileSent() {
 	s.mu.Unlock()
 }
 
+func (s *Stats) FileRcvd() {
+	s.mu.Lock()
+	s.filesRcvd++
+	s.mu.Unlock()
+}
+
 func (s *Stats) BytesSent(b int64) {
 	s.mu.Lock()
 	if s.clientRunning {
