@@ -444,6 +444,8 @@ github.com/clickin/hath/internal/hath/helpers.go:69.2,69.51 1 1
 github.com/clickin/hath/internal/hath/helpers.go:75.34,77.46 2 1
 github.com/clickin/hath/internal/hath/helpers.go:77.46,79.3 1 0
 github.com/clickin/hath/internal/hath/helpers.go:80.2,80.41 1 1
+github.com/clickin/hath/internal/hath/lifecycle.go:8.35,11.2 2 0
+github.com/clickin/hath/internal/hath/lifecycle.go:14.25,14.44 1 1
 github.com/clickin/hath/internal/hath/log.go:15.13,18.48 1 1
 github.com/clickin/hath/internal/hath/log.go:18.48,20.3 1 1
 github.com/clickin/hath/internal/hath/log.go:20.8,22.3 1 0

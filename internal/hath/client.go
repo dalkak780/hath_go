@@ -12,6 +12,8 @@ import (
 )
 
 // HathClient ties the subsystems together.
+var certRefreshSleep = 5 * time.Second // overridable in tests to skip the real delay
+
 type HathClient struct {
 	settings *Settings
 	stats    *Stats
@@ -97,15 +99,8 @@ func (c *HathClient) Run(ctx context.Context) error {
 	// honor SIGINT/SIGTERM in addition to ctx
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	cancelCtx, cancel := context.WithCancel(ctx)
+	cancelCtx, cancel := watchSignals(sigCh, ctx)
 	defer cancel()
-	go func() {
-		select {
-		case <-sigCh:
-			cancel()
-		case <-cancelCtx.Done():
-		}
-	}()
 
 	var lastThreadTime time.Duration
 	for !c.shutdown {
@@ -178,6 +173,22 @@ func (c *HathClient) cycle() {
 	c.stats.ShiftBytesSentHistory()
 }
 
+// watchSignals returns a context cancelled when sigCh fires or ctx is
+// cancelled. Extracted from Run so the cancellation logic is unit-testable
+// (OS signals themselves cannot be delivered deterministically in a test).
+// (OS signals themselves cannot be delivered deterministically in a test).
+func watchSignals(sigCh <-chan os.Signal, ctx context.Context) (context.Context, context.CancelFunc) {
+	cancelCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		select {
+		case <-sigCh:
+			cancel()
+		case <-cancelCtx.Done():
+		}
+	}()
+	return cancelCtx, cancel
+}
+
 // startServer fetches the cert and starts the TLS server in a goroutine.
 func (c *HathClient) startServer() error {
 	c.cert = &CertManager{settings: c.settings}
@@ -202,7 +213,7 @@ func (c *HathClient) refreshCerts() {
 		Warn("failed to suspend for cert refresh; will retry")
 		return
 	}
-	time.Sleep(5 * time.Second)
+	time.Sleep(certRefreshSleep)
 	c.server.Shutdown()
 	if err := c.cert.LoadOrRefresh(c.rpc); err != nil {
 		Error("cert refresh failed", "err", err)

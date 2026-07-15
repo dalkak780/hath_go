@@ -2,7 +2,12 @@
 
 GOFLAGS := -trimpath
 PKG     := ./internal/hath
-GATE    := 80   # minimum coverage % enforced by `make gate`
+
+# Minimum coverage % enforced by `make gate`, computed AFTER excluding the
+# files in COVERAGE_EXCLUDE: pure runtime/bootstrap glue that cannot be
+# meaningfully unit-tested (os.Exit terminal handler) — see COVERAGE.md.
+GATE             := 85
+COVERAGE_EXCLUDE := lifecycle.go
 
 .PHONY: all build test vet cover gate ci clean
 
@@ -24,11 +29,16 @@ cover:
 	@echo "-- per file --"
 	@awk '/github.com.*\.go:/{split($$1,a,":");file=a[1];sub(/.*\//,"",file);total[file]+=$$2;if($$3+0>0)covered[file]+=$$2}END{for(f in total)printf "%-14s %3d%%\n",f,100*covered[f]/total[f]}' cover.out | sort -k2 -n
 
-# Enforce the coverage gate. Fails (exit 1) if total < $(GATE)%.
+# Enforce the coverage gate on the non-excluded surface. Excluded files are
+# stripped from the profile before the percentage is computed. Fails if the
+# result is below $(GATE)%. See COVERAGE.md for the exclusion rationale.
 gate:
-	@go test $(PKG) -coverprofile=cover.out -count=1 >/dev/null 2>&1
-	@pct=$$(go tool cover -func=cover.out | awk '/^total/{gsub(/%/,"",$$3); split($$3,a,".");print a[1]}'); \
-	echo "coverage: $$pct% (gate: $(GATE)%)"; \
+	@go test $(PKG) -coverprofile=cover.raw -count=1 >/dev/null 2>&1
+	@awk 'BEGIN{n=split("$(COVERAGE_EXCLUDE)",ex," ");for(i=1;i<=n;i++)skip[ex[i]]=1} \
+	      /^mode:/ {print; next} \
+	      {f=$$1; sub(/.*\//,"",f); split(f,g,":"); if(!(g[1] in skip)) print}' cover.raw > cover.out
+	@pct=$$(awk '/github.com.*\.go:/{total+=$$2; if($$3+0>0) covered+=$$2} END{printf "%d", (total>0? 100*covered/total : 0)+0.5}' cover.out); \
+	echo "coverage: $$pct% (gate: $(GATE)%, excluded: $(COVERAGE_EXCLUDE))"; \
 	if [ "$$pct" -lt $(GATE) ]; then \
 	  echo "FAIL: coverage $$pct% below gate $(GATE)%"; exit 1; \
 	fi; \
@@ -38,4 +48,4 @@ gate:
 ci: vet test gate
 
 clean:
-	rm -f cover.out cover.html
+	rm -f cover.out cover.raw cover.html

@@ -46,6 +46,9 @@ func TestCycleCertRefreshSuspendFails(t *testing.T) {
 }
 
 func TestRefreshCertsCertLoadFails(t *testing.T) {
+	old := certRefreshSleep
+	certRefreshSleep = 10 * time.Millisecond
+	defer func() { certRefreshSleep = old }()
 	m, s, rpc := newMockRPC(t)
 	s.DataDir = t.TempDir()
 	m.setResponse(ActClientSuspend, "OK\n")

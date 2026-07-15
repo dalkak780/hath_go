@@ -194,6 +194,9 @@ func TestClientResumeBranch(t *testing.T) {
 }
 
 func TestRefreshCerts(t *testing.T) {
+	old := certRefreshSleep
+	certRefreshSleep = 10 * time.Millisecond
+	defer func() { certRefreshSleep = old }()
 	leaf, key := genCert(t)
 	p12, err := sslmate.LegacyRC2.Encode(key, leaf, nil, testClientKey)
 	if err != nil {

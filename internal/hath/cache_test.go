@@ -8,6 +8,24 @@ import (
 )
 
 func buildCache(t *testing.T) (*CacheHandler, *Settings) {
+	ch, s := buildCacheNoPruner(t)
+	c := &HathClient{settings: s, stats: NewStats()}
+	ch.client = c
+	realCh, err := NewCacheHandler(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if realCh.pruner != nil {
+			realCh.pruner.stop()
+		}
+	})
+	return realCh, s
+}
+
+// buildCacheNoPruner constructs a CacheHandler without scanning or starting the
+// pruner goroutine — for deterministic unit tests of prune/blacklist/import.
+func buildCacheNoPruner(t *testing.T) (*CacheHandler, *Settings) {
 	t.Helper()
 	s := NewSettings()
 	s.ClientID = testClientID
@@ -22,16 +40,12 @@ func buildCache(t *testing.T) (*CacheHandler, *Settings) {
 	os.MkdirAll(s.CacheDir, 0o755)
 	os.MkdirAll(s.TempDir, 0o755)
 	os.MkdirAll(s.DataDir, 0o755)
-	c := &HathClient{settings: s, stats: NewStats()}
-	ch, err := NewCacheHandler(c)
-	if err != nil {
-		t.Fatal(err)
+	ch := &CacheHandler{
+		client:            &HathClient{settings: s},
+		settings:          s, stats: NewStats(),
+		lru:               make([]uint16, lruCacheSize),
+		staticRangeOldest: make(map[string]int64),
 	}
-	t.Cleanup(func() {
-		if ch.pruner != nil {
-			ch.pruner.stop()
-		}
-	})
 	return ch, s
 }
 
