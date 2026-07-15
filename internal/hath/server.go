@@ -345,6 +345,11 @@ func (h *HTTPServer) serveCached(w http.ResponseWriter, r *http.Request, hvf *HV
 	if !h.settings.DisableFileVerify {
 		if h.cache.MarkRecentlyAccessed(hvf) && !h.cache.IsFileVerificationOnCooldown() {
 			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						Error("cache verify panicked; skipping", "fileid", hvf.Fileid(), "err", r)
+					}
+				}()
 				if !h.cache.VerifyFile(hvf) {
 					Warn("corrupt cached file; deleting", "fileid", hvf.Fileid())
 					h.cache.DeleteFileFromCache(hvf)
@@ -603,6 +608,11 @@ func (h *HTTPServer) runThreadedProxyTest(w http.ResponseWriter, add string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					Error("threaded proxy test panicked", "err", r)
+				}
+			}()
 			url := fmt.Sprintf("%s://%s:%s/t/%s/%s/%s/%d", protocol, hostname, port, testsize, testtime, testkey, randInt31())
 			start := time.Now()
 			resp, err := client.Get(url)

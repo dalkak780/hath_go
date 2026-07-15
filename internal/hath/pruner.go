@@ -15,13 +15,19 @@ type CachePruner struct {
 	cache   *CacheHandler
 	client  *HathClient
 	freq    atomic.Int64 // seconds between periodic checks
+	diskInt int          // ticks between free-disk watchdogs (0 = every tick)
 	stopCh  chan struct{}
 }
+
+// diskCheckTicks is the number of 1s ticks between free-disk watchdogs.
+// Kept as a field (default 300s, matching the original) so tests can tighten it.
+const defaultDiskCheckTicks = 300
 
 func newCachePruner(cache *CacheHandler, client *HathClient) *CachePruner {
 	p := &CachePruner{
 		cache:  cache,
 		client: client,
+		diskInt: defaultDiskCheckTicks,
 		stopCh: make(chan struct{}),
 	}
 	p.freq.Store(60)
@@ -50,14 +56,24 @@ func (p *CachePruner) loop() {
 		case <-ticker.C:
 		}
 
-		cacheLimit := p.cache.settings.DiskLimit
+		// A panic in cache maintenance must not take down the whole node; log
+		// it and let the loop continue. Disk-full is a deliberate fatal exit via
+		// dieErr (not a panic), so it still stops the process.
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					Error("cache pruner panicked; continuing", "err", r)
+				}
+			}()
+
+			cacheLimit := p.cache.settings.DiskLimit
 		cacheSize := p.cache.CacheSizeWithOverhead()
 
 		if cacheSize > cacheLimit {
 			Info("cache handler: cache over limit, pruning aggressively",
 				"pctOver", 100.0*float64(cacheSize)/float64(cacheLimit)-100.0)
 			p.cache.CheckAndPruneCache()
-			continue
+			return
 		}
 
 		cacheCheckTicks++
@@ -67,13 +83,14 @@ func (p *CachePruner) loop() {
 		}
 
 		diskCheckTicks++
-		if diskCheckTicks > 300 {
+		if diskCheckTicks > p.diskInt {
 			if !p.cache.HasFreeDiskSpace() {
 				dieErr("free disk space dropped below the minimum threshold; free space or reduce cache size at https://e-hentai.org/hentaiathome.php?cid=" +
 					itoa(p.cache.settings.ClientID))
 			}
 			diskCheckTicks = 0
 		}
+		}()
 	}
 }
 

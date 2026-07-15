@@ -63,9 +63,15 @@ func (g *GalleryDownloader) loop() {
 			downloadsAvailable = false
 			break
 		}
-		Info("gallery downloader: starting gallery", "title", g.title)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					Error("gallery downloader: panic processing gallery; skipping", "title", g.title, "err", r)
+				}
+			}()
+			Info("gallery downloader: starting gallery", "title", g.title)
 
-		galleryretry := 0
+			galleryretry := 0
 		totalFailed := 0
 		success := false
 		for !success && galleryretry < 10 && totalFailed < g.filecount*2 {
@@ -100,7 +106,8 @@ func (g *GalleryDownloader) loop() {
 				success = true
 			}
 		}
-		g.finalize(success)
+			g.finalize(success)
+		}()
 	}
 	Info("gallery downloader: thread finished")
 	g.client.gallery = nil
@@ -199,17 +206,40 @@ func (g *GalleryDownloader) setTitle(raw string) {
 	}
 	postfix := " [" + strconv.Itoa(g.gid) + xresTitle + "]"
 	maxLen := g.settings.MaxFilenameLen
+
 	runes := []rune(t)
-	if len(runes)+len(postfix) > maxLen {
-		keep := maxLen - len(postfix) - 3
-		if keep < 0 {
-			keep = 0
-		}
-		if keep > len(runes) {
-			keep = len(runes)
-		}
-		t = string(runes[:keep]) + "..."
+	// 1) rune/UTF-16-unit budget (parity with the original Java client)
+	budget := maxLen - len([]rune(postfix))
+	if budget < 0 {
+		budget = 0
 	}
+	truncated := len(runes) > budget
+	if truncated {
+		// reserve 3 runes for the ellipsis, matching the original Java client's
+		// codePointCount(0, maxFilenameLength - postfixLength - 3)
+		budget -= 3
+		if budget < 0 {
+			budget = 0
+		}
+		runes = runes[:budget]
+	}
+	// 2) hard 255-byte filesystem limit, rune-safe. Unix/ZFS (and most
+	// filesystems) cap a name at 255 *bytes*, not characters. The Java client
+	// sized by UTF-16 units (default 125) and so a long multi-byte (e.g. CJK)
+	// title blew past 255 bytes, hit ENAMETOOLONG, and fell back to an ASCII
+	// name — surfacing as "failed to create unicode filename" on Linux/ZFS.
+	// Go has no charset problem (names are native UTF-8) but would hit the same
+	// byte overflow, so re-truncate rune-safely to keep the unicode name. The
+	// ellipsis (added only when truncated) is counted in the byte budget.
+	const maxNameBytes = 255
+	ellipsis := ""
+	if truncated {
+		ellipsis = "..."
+	}
+	for len([]byte(string(runes)+ellipsis+postfix)) > maxNameBytes && len(runes) > 0 {
+		runes = runes[:len(runes)-1]
+	}
+	t = string(runes) + ellipsis
 	dir := filepath.Join(g.settings.DownloadDir, t+postfix)
 	// traversal guard: parent must be the download dir
 	if filepath.Dir(dir) != g.settings.DownloadDir {
