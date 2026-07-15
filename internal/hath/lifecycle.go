@@ -1,13 +1,14 @@
 package hath
 
-import (
-	"os"
-)
+import "os"
 
-// dieErr mirrors HentaiAtHomeClient.dieWithError: log the critical error and
-// terminate. The original also flushed a clean shutdown; for fatal config/parse
-// errors an immediate exit is the honest behavior.
-func dieErr(msg string) {
+// fatalError is the terminal handler invoked by dieErr. It is a variable so
+// tests can replace os.Exit with a panic (recoverable) and assert the failure
+// path without killing the test binary.
+var fatalError = func(msg string) {
 	Error("Critical Error: " + msg)
 	os.Exit(1)
 }
+
+// dieErr mirrors HentaiAtHomeClient.dieWithError: surface the error and stop.
+func dieErr(msg string) { fatalError(msg) }

@@ -12,6 +12,16 @@ import (
 // emits a log line per request. We keep the original method names.
 var logger *zap.SugaredLogger
 
+func init() {
+	// Provide a usable default so callers (and tests) never hit a nil logger
+	// before InitLog runs. InitLog replaces it at startup.
+	if l, err := zap.NewDevelopment(); err == nil {
+		logger = l.Sugar()
+	} else {
+		logger = zap.NewNop().Sugar()
+	}
+}
+
 // InitLog configures the package logger.
 func InitLog(levelDebug, disableFile bool, logDir string) {
 	level := zapcore.InfoLevel

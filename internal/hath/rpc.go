@@ -210,6 +210,10 @@ func (h *ServerHandler) callURL(rawurl, retryAct string) *ServerResponse {
 	for i := range lines {
 		lines[i] = strings.TrimRight(lines[i], "\r")
 	}
+	// Java's String.split("\n") drops trailing empty strings; match that.
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
 	if len(lines) == 0 || lines[0] == "" {
 		return &ServerResponse{Status: RespNull, FailCode: "NO_RESPONSE", FailHost: lower(host)}
 	}
@@ -489,6 +493,9 @@ func (h *ServerHandler) DownloadToFile(rawurl, dest string, timeout time.Duratio
 		return 0, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("origin returned status %d", resp.StatusCode)
+	}
 	if resp.ContentLength < 0 {
 		return 0, errors.New("missing Content-Length")
 	}

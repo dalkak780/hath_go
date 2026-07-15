@@ -35,7 +35,7 @@ type Settings struct {
 	StaticRangeCount int
 
 	// rpc
-	RPCServerPort int16
+	RPCServerPort int
 	RPCPath       string
 	StaticRanges  map[string]bool
 
@@ -210,7 +210,7 @@ func (s *Settings) applySetting(name, value string) {
 		s.SetServerTime(atoi64(value))
 		Debug("setting altered", "server_time_delta", s.serverTimeDelta)
 	case "rpc_server_port":
-		s.RPCServerPort = int16(atoi(value))
+		s.RPCServerPort = atoi(value)
 	case "rpc_server_ip":
 		s.setRPCServers(value)
 	case "rpc_path":
@@ -401,7 +401,7 @@ func (s *Settings) ClearRPCServerFailure() {
 	}
 }
 
-func withPort(host string, port int16) string {
+func withPort(host string, port int) string {
 	if port == 0 || port == 80 {
 		return host
 	}

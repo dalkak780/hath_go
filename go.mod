@@ -9,4 +9,7 @@ require (
 	golang.org/x/sys v0.35.0
 )
 
-require go.uber.org/multierr v1.10.0 // indirect
+require (
+	go.uber.org/multierr v1.10.0 // indirect
+	software.sslmate.com/src/go-pkcs12 v0.7.3 // indirect
+)
