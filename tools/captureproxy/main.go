@@ -1,17 +1,8 @@
-// Command captureproxy is a forward HTTP proxy that logs every request and its
-// response, in the clear, to a JSONL file. Because the H@H RPC is plain HTTP,
-// running the official Java client through this proxy captures the exact wire
-// format (request line, headers, query string, actkey) and the real server
-// response bodies — the ground truth for building/validating the Go client's
-// RPC mock.
-//
-// Usage against a live Java client:
-//
-//	go run ./tools/captureproxy -listen :8888 -out rpc_capture.jsonl
-//
-// then start the Java client with the JVM pointed at the proxy:
-//
-//	java -Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=8888 -jar HentaiAtHome.jar
+// Command captureproxy is a forward HTTP proxy that logs every request/response
+// pair, in the clear, to a JSONL file. The H@H RPC is plain HTTP, so routing the
+// official Java client through this proxy captures the exact wire format
+// (request line, query string, actkey) and the real server response bodies —
+// the ground truth for validating the Go client's RPC.
 //
 // Each JSONL record is one request/response pair. Binary bodies (e.g. the
 // get_cert PKCS#12) are base64-encoded under body_b64.
@@ -29,153 +20,117 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
 
 type record struct {
-	Ts        time.Time      `json:"ts"`
-	Method    string         `json:"method"`
-	URL       string         `json:"url"`
-	ReqHeader http.Header    `json:"req_header"`
-	ReqBody   string         `json:"req_body,omitempty"`
-	Status    int            `json:"status"`
-	RespHeader http.Header   `json:"resp_header"`
-	RespBody  string         `json:"resp_body,omitempty"`
-	BodyB64   string         `json:"body_b64,omitempty"`
-	Err       string         `json:"err,omitempty"`
+	Ts         time.Time   `json:"ts"`
+	Method     string      `json:"method"`
+	URL        string      `json:"url"`
+	ReqHeader  http.Header `json:"req_header"`
+	ReqBody    string      `json:"req_body,omitempty"`
+	Status     int         `json:"status"`
+	RespHeader http.Header `json:"resp_header"`
+	RespBody   string      `json:"resp_body,omitempty"`
+	BodyB64    string      `json:"body_b64,omitempty"`
+	Err        string      `json:"err,omitempty"`
 }
 
-var (
-	outPath string
-	host    string
-	mu      sync.Mutex
-	maxLog  = 64 * 1024 // cap text body logging; full binary via base64
-)
+const maxLogBody = 1 << 20 // 1 MiB cap on captured bodies
 
-func main() {
-	flag.StringVar(&outPath, "out", "rpc_capture.jsonl", "output JSONL path")
-	flag.StringVar(&host, "host", "", "only log requests whose URL host contains this substring")
-	flag.Parse()
+// newCaptureHandler builds the proxy handler. out receives one JSON record per
+// request. hostFilter, if non-empty, skips logging for URLs whose host does not
+// contain it (still forwarded). transport is used for upstream (defaults to
+// http.DefaultTransport when nil).
+func newCaptureHandler(out io.Writer, hostFilter string, transport http.RoundTripper) http.Handler {
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	var mu sync.Mutex
+	enc := json.NewEncoder(out)
+	enc.SetEscapeHTML(false)
 
-	proxy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rec := record{Method: r.Method, URL: r.URL.String(), ReqHeader: r.Header.Clone()}
-		rec.Ts = time.Now()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log := hostFilter == "" || strings.Contains(r.URL.Host, hostFilter)
 
-		if host != "" && !contains(r.URL.Host, host) {
-			// pass through without logging
-			roundTrip(w, r, nil)
+		// buffer request body so it can be both forwarded and recorded
+		var reqBody []byte
+		if r.Body != nil {
+			reqBody, _ = io.ReadAll(io.LimitReader(r.Body, maxLogBody))
+			r.Body.Close()
+			r.Body = io.NopCloser(strings.NewReader(string(reqBody)))
+		}
+
+		resp, err := transport.RoundTrip(r)
+		rec := record{Ts: time.Now(), Method: r.Method, URL: r.URL.String(), ReqHeader: r.Header.Clone(), ReqBody: string(reqBody)}
+		if err != nil {
+			rec.Err = err.Error()
+			if log {
+				mu.Lock()
+				enc.Encode(rec)
+				mu.Unlock()
+			}
+			http.Error(w, "proxy error: "+err.Error(), http.StatusBadGateway)
 			return
 		}
 
-		// read request body (usually empty for GET RPC)
-		if r.Body != nil {
-			rb, _ := io.ReadAll(io.LimitReader(r.Body, int64(maxLog)))
-			r.Body.Close()
-			r.Body = io.NopCloser(newBytesReader(rb))
-			rec.ReqBody = string(rb)
+		// forward headers + status to the real client
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
 		}
+		w.WriteHeader(resp.StatusCode)
 
-		captured := &captureWriter{header: w.Header()}
-		status := roundTrip(captured, r, nil)
-		rec.Status = status
-		rec.RespHeader = captured.header.Clone()
-		if len(captured.body) <= maxLog && isText(captured.header.Get("Content-Type")) {
-			rec.RespBody = string(captured.body)
-		} else {
-			rec.BodyB64 = base64.StdEncoding.EncodeToString(captured.body)
+		// tee the body: client gets it live, we keep a copy
+		var buf strings.Builder
+		_, _ = io.Copy(io.MultiWriter(w, &captureSink{&buf}), resp.Body)
+		resp.Body.Close()
+
+		if log {
+			rec.Status = resp.StatusCode
+			rec.RespHeader = resp.Header.Clone()
+			body := buf.String()
+			if isText(resp.Header.Get("Content-Type")) && len(body) <= maxLogBody {
+				rec.RespBody = body
+			} else {
+				rec.BodyB64 = base64.StdEncoding.EncodeToString([]byte(body))
+			}
+			mu.Lock()
+			enc.Encode(rec)
+			mu.Unlock()
 		}
-
-		writeRecord(rec)
 	})
-
-	log.Println("capture proxy listening, routing to", outPath)
-	log.Fatal(http.ListenAndServe(getAddr(), proxy))
 }
 
-// roundTrip forwards the request through the default transport and writes the
-// response back to w. Returns the status code.
-func roundTrip(w http.ResponseWriter, r *http.Request, _ any) int {
-	resp, err := http.DefaultTransport.RoundTrip(r)
-	if err != nil {
-		http.Error(w, "proxy error: "+err.Error(), http.StatusBadGateway)
-		return http.StatusBadGateway
-	}
-	defer resp.Body.Close()
-	for k, vs := range resp.Header {
-		for _, v := range vs {
-			w.Header().Add(k, v)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
-	return resp.StatusCode
+func isText(ct string) bool {
+	return strings.Contains(ct, "text") || strings.Contains(ct, "json")
 }
 
-type captureWriter struct {
-	header http.Header
-	body   []byte
-}
+// captureSink is an io.Writer backed by a strings.Builder.
+type captureSink struct{ b *strings.Builder }
 
-func (c *captureWriter) Header() http.Header {
-	if c.header == nil {
-		c.header = http.Header{}
-	}
-	return c.header
-}
-func (c *captureWriter) WriteHeader(int)        {}
-func (c *captureWriter) Write(p []byte) (int, error) {
-	c.body = append(c.body, p...)
-	return len(p), nil
-}
+func (s *captureSink) Write(p []byte) (int, error) { return s.b.Write(p) }
 
-func writeRecord(rec record) {
-	mu.Lock()
-	defer mu.Unlock()
+func main() {
+	var (
+		outPath string
+		host    string
+		addr    string
+	)
+	flag.StringVar(&outPath, "out", "rpc_capture.jsonl", "output JSONL path")
+	flag.StringVar(&host, "host", "", "only log requests whose URL host contains this substring (others are still forwarded)")
+	flag.StringVar(&addr, "listen", ":8888", "listen address")
+	flag.Parse()
+
 	f, err := os.OpenFile(outPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		log.Println("open out:", err)
-		return
+		log.Fatal("open out: ", err)
 	}
 	defer f.Close()
-	enc := json.NewEncoder(f)
-	enc.SetEscapeHTML(false)
-	_ = enc.Encode(rec)
-}
 
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && indexOf(s, sub) >= 0
-}
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
-}
-func isText(ct string) bool {
-	return contains(ct, "text") || contains(ct, "application/octet-stream") == false && ct != ""
-}
-func getAddr() string {
-	if a := os.Getenv("CAP_LISTEN"); a != "" {
-		return a
-	}
-	return ":8888"
-}
-
-// tiny bytes reader to avoid pulling "bytes" for one call
-type bytesReader struct {
-	b []byte
-	i int
-}
-
-func newBytesReader(b []byte) *bytesReader { return &bytesReader{b: b} }
-func (r *bytesReader) Read(p []byte) (int, error) {
-	if r.i >= len(r.b) {
-		return 0, io.EOF
-	}
-	n := copy(p, r.b[r.i:])
-	r.i += n
-	return n, nil
+	log.Printf("capture proxy listening on %s, logging to %s", addr, outPath)
+	log.Fatal(http.ListenAndServe(addr, newCaptureHandler(f, host, nil)))
 }

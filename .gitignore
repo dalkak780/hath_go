@@ -22,3 +22,8 @@ coverage.out
 .DS_Store
 .idea/
 .vscode/
+
+# capture artifacts
+rpc_capture.jsonl
+rpc.pcap
+*.pcap
