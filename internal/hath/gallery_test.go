@@ -1,6 +1,7 @@
 package hath
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,8 @@ func TestGalleryParseMeta(t *testing.T) {
 	s := NewSettings()
 	s.ClientID = testClientID
 	s.MaxFilenameLen = 125
+	dir := t.TempDir()
+	s.DownloadDir = dir
 	g := &GalleryDownloader{settings: s, rpc: &ServerHandler{settings: s}}
 	meta := "GID 4242\nFILECOUNT 2\nMINXRES org\nTITLE Test Gallery\nFILELIST\n1 0 org aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa jpg page1\n2 1 org unknown png page two\nINFORMATION\nsome info line\n"
 	if !g.parseMeta(meta) {
@@ -127,5 +130,39 @@ func TestValidateFileSHA1(t *testing.T) {
 	}
 	if validateFileSHA1(p, "0000000000000000000000000000000000000000") {
 		t.Fatal("wrong hash should not validate")
+	}
+}
+
+func TestDebugXresRe(t *testing.T) {
+	fmt.Printf("xresRe: %v\n", xresRe)
+	fmt.Printf("xresRe.MatchString('org'): %v\n", xresRe.MatchString("org"))
+	
+	// Test the actual parsing logic
+	line := "MINXRES org"
+	k, v, ok := strings.Cut(line, " ")
+	if ok && k == "MINXRES" {
+		t.Logf("MINXRES value: %q, xresRe.MatchString: %v", v, xresRe.MatchString(v))
+		if !xresRe.MatchString(v) {
+			t.Fatal("xresRe should match 'org'")
+		}
+	}
+}
+
+func TestDebugParseMetaDirect(t *testing.T) {
+	s := NewSettings()
+	s.ClientID = testClientID
+	s.MaxFilenameLen = 125
+	dir := t.TempDir()
+	s.DownloadDir = dir
+	g := &GalleryDownloader{settings: s, rpc: &ServerHandler{settings: s}}
+	meta := "GID 4242\nFILECOUNT 2\nMINXRES org\nTITLE Test Gallery\nFILELIST\n1 0 org aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa jpg page1\n2 1 org unknown png page two\nINFORMATION\nsome info line\n"
+	
+	// Debug: call parseMeta step by step
+	fmt.Printf("Before parseMeta: gid=%d, filecount=%d, minxres=%q, title=%q\n", g.gid, g.filecount, g.minxres, g.title)
+	result := g.parseMeta(meta)
+	fmt.Printf("After parseMeta: result=%v, gid=%d, filecount=%d, minxres=%q, title=%q, todir=%q, files=%d\n", 
+		result, g.gid, g.filecount, g.minxres, g.title, g.todir, len(g.files))
+	if !result {
+		t.Fatal("parseMeta should succeed")
 	}
 }
