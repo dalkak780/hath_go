@@ -329,7 +329,7 @@ github.com/clickin/hath/internal/hath/gallery.go:62.17,64.9 2 1
 github.com/clickin/hath/internal/hath/gallery.go:66.3,71.68 5 1
 github.com/clickin/hath/internal/hath/gallery.go:71.68,74.31 3 1
 github.com/clickin/hath/internal/hath/gallery.go:74.31,75.34 1 1
-github.com/clickin/hath/internal/hath/gallery.go:75.34,76.11 1 1
+github.com/clickin/hath/internal/hath/gallery.go:75.34,76.11 1 0
 github.com/clickin/hath/internal/hath/gallery.go:78.5,79.27 2 1
 github.com/clickin/hath/internal/hath/gallery.go:80.26,82.26 2 1
 github.com/clickin/hath/internal/hath/gallery.go:82.26,84.7 1 1
@@ -394,7 +394,7 @@ github.com/clickin/hath/internal/hath/gallery.go:228.37,237.2 8 1
 github.com/clickin/hath/internal/hath/gallery.go:239.52,242.13 3 1
 github.com/clickin/hath/internal/hath/gallery.go:242.13,244.104 2 1
 github.com/clickin/hath/internal/hath/gallery.go:244.104,246.4 1 0
-github.com/clickin/hath/internal/hath/gallery.go:247.8,249.3 1 1
+github.com/clickin/hath/internal/hath/gallery.go:247.8,249.3 1 0
 github.com/clickin/hath/internal/hath/gallery.go:252.70,254.31 2 1
 github.com/clickin/hath/internal/hath/gallery.go:254.31,255.16 1 1
 github.com/clickin/hath/internal/hath/gallery.go:255.16,257.4 1 1
@@ -941,10 +941,10 @@ github.com/clickin/hath/internal/hath/settings.go:356.28,358.3 1 1
 github.com/clickin/hath/internal/hath/settings.go:359.2,359.28 1 1
 github.com/clickin/hath/internal/hath/settings.go:359.28,362.3 2 0
 github.com/clickin/hath/internal/hath/settings.go:364.2,366.23 3 1
-github.com/clickin/hath/internal/hath/settings.go:366.23,368.3 1 0
+github.com/clickin/hath/internal/hath/settings.go:366.23,368.3 1 1
 github.com/clickin/hath/internal/hath/settings.go:369.2,369.41 1 1
 github.com/clickin/hath/internal/hath/settings.go:369.41,372.61 3 1
-github.com/clickin/hath/internal/hath/settings.go:372.61,373.12 1 1
+github.com/clickin/hath/internal/hath/settings.go:372.61,373.12 1 0
 github.com/clickin/hath/internal/hath/settings.go:375.3,376.8 2 1
 github.com/clickin/hath/internal/hath/settings.go:378.2,378.54 1 1
 github.com/clickin/hath/internal/hath/settings.go:382.54,385.30 3 1

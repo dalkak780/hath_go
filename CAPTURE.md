@@ -14,13 +14,25 @@ the clear.
                                                                  formula + your real client key)
 ```
 
-## 1. Build the tools (on the Docker host)
+## 1. Get the capture proxy binary on the Linux host
+
+The Linux host (where the Java container runs) needs `captureproxy`. If it has
+Go installed, you can build directly:
 
 ```bash
-cd hath
-go build -o captureproxy ./tools/captureproxy
-# rpcverify runs via `go run`
+cd hath && go build -o captureproxy ./tools/captureproxy
 ```
+
+Otherwise, **cross-compile from your dev machine** and copy the binary:
+
+```bash
+# on your dev machine (macOS)
+cd hath && make dist
+scp dist/captureproxy-linux-amd64 user@linux-host:~/captureproxy
+#  (or arm64: dist/captureproxy-linux-arm64)
+```
+
+`captureproxy` is a statically linked binary — no dependencies on the target.
 
 ## 2. Start the capture proxy
 
@@ -29,7 +41,7 @@ go build -o captureproxy ./tools/captureproxy
 ```
 
 - `-listen :8888` binds on **all interfaces** so the container can reach it.
-- Omit `-host` to log everything (downloads are forwarded but `rpcverify`
+- Omit `-host` to log everything (downloads are forwarded, but `rpcverify`
   ignores any request without an `actkey`, so only RPC matters).
 - **No IP concern:** the container already NATs out through the host's public
   IP, so routing RPC through a host-side proxy does **not** change the source IP
@@ -59,8 +71,14 @@ Watch the proxy log to confirm traffic is flowing.
 
 ## 4. Verify parity
 
+Copy the capture back to your dev machine and run `rpcverify`:
+
 ```bash
-go run ./tools/rpcverify -in rpc_capture.jsonl -login data/client_login
+# on linux host
+scp rpc_capture.jsonl user@dev-machine:~/hath/
+
+# on dev machine
+cd hath && go run ./tools/rpcverify -in rpc_capture.jsonl -login data/client_login
 # (or: -key <20-char-key> -cid <id>)
 ```
 
