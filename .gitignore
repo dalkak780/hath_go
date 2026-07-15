@@ -27,3 +27,5 @@ coverage.out
 rpc_capture.jsonl
 rpc.pcap
 *.pcap
+cover.out
+cover.raw

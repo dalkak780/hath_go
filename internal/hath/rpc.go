@@ -157,6 +157,9 @@ func (h *ServerHandler) fetchFile(rawurl, dest string, timeout time.Duration) er
 				return err
 			}
 			defer resp.Body.Close()
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				return fmt.Errorf("origin returned status %d", resp.StatusCode)
+			}
 			if resp.ContentLength <= 0 {
 				return errors.New("missing Content-Length")
 			}

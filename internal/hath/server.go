@@ -340,25 +340,39 @@ func (h *HTTPServer) serveCached(w http.ResponseWriter, r *http.Request, hvf *HV
 	}
 	defer f.Close()
 
-	if !h.settings.DisableFileVerify && h.cache.MarkRecentlyAccessed(hvf) && !h.cache.IsFileVerificationOnCooldown() {
-		go func() {
-			if !h.cache.VerifyFile(hvf) {
-				Warn("corrupt cached file; deleting", "fileid", hvf.Fileid())
-				h.cache.DeleteFileFromCache(hvf)
-			}
-		}()
+	// Best-effort integrity re-check (unchanged behavior): a recently-accessed
+	// file is verified in the background; corrupt files are purged.
+	if !h.settings.DisableFileVerify {
+		if h.cache.MarkRecentlyAccessed(hvf) && !h.cache.IsFileVerificationOnCooldown() {
+			go func() {
+				if !h.cache.VerifyFile(hvf) {
+					Warn("corrupt cached file; deleting", "fileid", hvf.Fileid())
+					h.cache.DeleteFileFromCache(hvf)
+				}
+			}()
+		} else {
+			h.cache.MarkRecentlyAccessed(hvf)
+		}
 	} else {
 		h.cache.MarkRecentlyAccessed(hvf)
 	}
 
+	fi, err := f.Stat()
+	if err != nil {
+		h.empty(w, http.StatusInternalServerError)
+		return
+	}
+
+	// Caddy-style static serving: hand the *os.File (an io.ReadSeeker) to
+	// http.ServeContent. On the disk->socket path this streams via sendfile(2)
+	// (zero-copy, no userspace buffer), honors Range requests (206 Partial
+	// Content) and conditional If-Modified-Since / If-None-Match (304), and
+	// sets Content-Length, Last-Modified and Accept-Ranges for us. The common
+	// case (a plain GET) is byte-for-byte identical to before.
 	w.Header().Set("Content-Type", hvf.Mime())
 	w.Header().Set("Cache-Control", "public, max-age=31536000")
-	w.Header().Set("Content-Length", strconv.FormatInt(hvf.Size, 10))
-	w.WriteHeader(http.StatusOK)
 	h.stats.FileSent()
-	if r.Method != http.MethodHead {
-		io.Copy(w, f)
-	}
+	http.ServeContent(w, r, hvf.Fileid(), fi.ModTime(), f)
 	Info("served", "code", 200, "bytes", hvf.Size, "path", r.RequestURI)
 }
 
@@ -412,13 +426,18 @@ func (h *HTTPServer) proxyFile(w http.ResponseWriter, r *http.Request, hvf *HVFi
 	}
 	defer f.Close()
 
+	fi, err := f.Stat()
+	if err != nil {
+		h.empty(w, http.StatusInternalServerError)
+		return
+	}
+
+	// Serve via http.ServeContent for zero-copy sendfile + Range/conditional
+	// support, exactly like serveCached.
 	w.Header().Set("Content-Type", hvf.Mime())
 	w.Header().Set("Cache-Control", "public, max-age=31536000")
-	w.Header().Set("Content-Length", strconv.FormatInt(n, 10))
-	w.WriteHeader(http.StatusOK)
-	if r.Method != http.MethodHead {
-		io.Copy(w, f)
-	}
+	h.stats.FileSent()
+	http.ServeContent(w, r, hvf.Fileid(), fi.ModTime(), f)
 	// import verified copy into the cache (best-effort)
 	if h.cache.ImportFileToCache(tmpPath, hvf) {
 		Debug("proxy file imported to cache", "fileid", fileid)
@@ -523,7 +542,7 @@ func (h *HTTPServer) handleSpeedtest(w http.ResponseWriter, r *http.Request, seg
 }
 
 func (h *HTTPServer) empty(w http.ResponseWriter, code int) {
-	w.Header().Set("Content-Type", "text/plain; charset=iso-8859-1")
+	w.Header().Set("Content-Type", "text/html; charset=iso-8859-1")
 	w.WriteHeader(code)
 }
 
