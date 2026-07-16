@@ -169,7 +169,7 @@ jobs:
         run: |
           set -euo pipefail
           RELEASE_FLAGS=()
-          if [[ "$RELEASE_TAG" == *-* ]]; then
+          if [[ "$RELEASE_TAG" =~ -(alpha|beta|rc)([.-]|$) ]]; then
             RELEASE_FLAGS+=(--prerelease)
           fi
           gh release create "$RELEASE_TAG" dist/* \

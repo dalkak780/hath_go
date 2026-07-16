@@ -1,11 +1,11 @@
 # hath — Hentai@Home client in Go
 
-[![Test](https://github.com/dalkak780/hath/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/dalkak780/hath/actions/workflows/test.yml)
-[![Coverage](https://github.com/dalkak780/hath/actions/workflows/coverage.yml/badge.svg?branch=main)](https://github.com/dalkak780/hath/actions/workflows/coverage.yml)
+[![Release](https://img.shields.io/github/v/release/dalkak780/hath_go?include_prereleases&sort=semver&label=release)](https://github.com/dalkak780/hath_go/releases/latest)
+[![Docker Hub](https://img.shields.io/docker/v/dalkak780/hath_go?sort=semver&label=Docker%20Hub)](https://hub.docker.com/r/dalkak780/hath_go/tags)
+[![GHCR](https://img.shields.io/github/v/release/dalkak780/hath_go?include_prereleases&sort=semver&label=GHCR)](https://github.com/dalkak780/hath_go/pkgs/container/hath_go)
 
-A Go port of the [Hentai@Home](https://repo.e-hentai.org/hath/)
-distributed-CDN client. It preserves the Java client's RPC and cache behavior
-while using Go's HTTP and TLS implementations.
+A Go port of the Hentai@Home distributed-CDN client. It preserves the Java
+client's RPC and cache behavior while using Go's HTTP and TLS implementations.
 
 Images are published to both registries:
 
