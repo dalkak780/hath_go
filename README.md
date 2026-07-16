@@ -16,6 +16,25 @@ This is a derivative work of Hentai@Home by E-Hentai.org / tenboro, licensed
 under GPL-3.0-or-later. The original Java source is kept in `hath_java/` for
 reference only.
 
+## Status and disclaimer
+
+This is an independent community port, not an official E-Hentai.org release.
+The official Java client remains the reference implementation and has years of
+operational history that this port does not yet have.
+
+The port exists primarily to reduce long-term maintenance around a Java 8
+target and an HTTP server implemented directly on top of TLS sockets. It keeps
+the H@H-specific protocol behavior while delegating generic HTTP parsing,
+connection lifecycle, timeouts, and TLS to Go's maintained standard library.
+It also ships as a static binary and small container image.
+
+The tradeoffs are significant: there is no GUI, real-world coverage is still
+limited, and undiscovered behavioral differences may remain. Use it at your
+own risk, back up all volumes before migrating, and never run the Java and Go
+clients concurrently with the same Client ID. Please report problems through
+[GitHub Issues](https://github.com/dalkak780/hath_go/issues), without posting
+Client IDs, keys, certificates, or authenticated RPC captures.
+
 ## How it works
 
 The client has two roles:
