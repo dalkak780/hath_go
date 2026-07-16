@@ -79,10 +79,10 @@ jobs:
               'rpcverify:./tools/rpcverify' \
               'pfxinspect:./tools/pfxinspect'; do
               NAME="${spec%%:*}"
-              PATH="${spec#*:}"
+              PACKAGE_PATH="${spec#*:}"
               CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
                 go build -trimpath -ldflags='-s -w -buildid=' \
-                -o "staging/${PACKAGE}/${NAME}" "$PATH"
+                -o "staging/${PACKAGE}/${NAME}" "$PACKAGE_PATH"
             done
 
             tar -C "staging/${PACKAGE}" -czf "dist/${PACKAGE}.tar.gz" .

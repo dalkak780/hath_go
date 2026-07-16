@@ -144,7 +144,7 @@ old bind-mount paths:
 
 ```dotenv
 # Canary release; keep restart disabled until startup and external TLS pass.
-HATH_IMAGE=ghcr.io/dalkak780/hath_go:1.6.5-go.1
+HATH_IMAGE=ghcr.io/dalkak780/hath_go:1.6.5-go.2
 HATH_CLIENT_ID=12345
 HATH_CLIENT_KEY=your-20-character-client-key
 HATH_PORT=12345
