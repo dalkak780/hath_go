@@ -41,6 +41,10 @@ var (
 	wsCollapseRe = regexp.MustCompile(`\s+`)
 )
 
+// gallerySleep wraps time.Sleep so tests can stub the (potentially long)
+// backoff sleeps without slowing the suite. Mirrors certRefreshSleep.
+var gallerySleep = func(d time.Duration) { time.Sleep(d) }
+
 // NewGalleryDownloader starts the downloader goroutine.
 func NewGalleryDownloader(c *HathClient) *GalleryDownloader {
 	g := &GalleryDownloader{
@@ -99,7 +103,7 @@ func (g *GalleryDownloader) loop() {
 					sleep = 5 * time.Minute
 				}
 				if sleep > 0 {
-					time.Sleep(sleep)
+					gallerySleep(sleep)
 				}
 			}
 			if successful == g.filecount {
@@ -129,7 +133,7 @@ func (g *GalleryDownloader) fetchMeta() bool {
 	if g.marked {
 		add = strconv.Itoa(g.gid) + ";" + g.minxres
 	}
-	meta := g.rpc.FetchQueue(add)
+	meta := strings.TrimSpace(g.rpc.FetchQueue(add))
 	if meta == "" || meta == "INVALID_REQUEST" || meta == "NO_PENDING_DOWNLOADS" {
 		return false
 	}

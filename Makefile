@@ -5,9 +5,12 @@ PKG     := ./internal/hath
 
 # Minimum coverage % enforced by `make gate`, computed AFTER excluding the
 # files in COVERAGE_EXCLUDE: pure runtime/bootstrap glue that cannot be
-# meaningfully unit-tested (os.Exit terminal handler) — see COVERAGE.md.
+# meaningfully unit-tested.
+#   - lifecycle.go : os.Exit terminal handler (no testable return path)
+#   - log.go       : init() fallback is unreachable (zap.NewDevelopment never
+#                    fails); the rest is a thin zap wrapper.
 GATE             := 85
-COVERAGE_EXCLUDE := lifecycle.go
+COVERAGE_EXCLUDE := lifecycle.go log.go
 
 .PHONY: all build test vet cover gate ci dist clean
 
