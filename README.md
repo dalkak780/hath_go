@@ -5,6 +5,11 @@
 
 A Go reimplementation of the Hentai@Home distributed-CDN client.
 
+> [!WARNING]
+> Production migration is currently blocked by the ongoing
+> [Java → Go behavioral parity audit](PARITY_AUDIT.md). RPC authentication
+> parity and line coverage do not yet prove full runtime interoperability.
+
 This is a **derivative work** of [Hentai@Home](https://repo.e-hentai.org/hath/)
 by E-Hentai.org / tenboro, licensed under the GNU General Public License v3.
 The original Java source is preserved under `hath_java/` for reference only.
