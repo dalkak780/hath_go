@@ -424,10 +424,10 @@ func (h *HTTPServer) serveCached(w http.ResponseWriter, r *http.Request, hvf *HV
 		}
 	}
 	if writeErr != nil {
-		Debug("serve interrupted", "bytes", sent, "expected", hvf.Size, "duration", time.Since(started), "path", r.RequestURI, "err", writeErr)
+		Debug("serve interrupted", "bytes", sent, "expected", hvf.Size, "duration", time.Since(started).String(), "path", r.RequestURI, "err", writeErr)
 		return
 	}
-	Info("served", "code", 200, "bytes", sent, "expected", hvf.Size, "duration", time.Since(started), "path", r.RequestURI)
+	Info("served", "code", 200, "bytes", sent, "expected", hvf.Size, "duration", time.Since(started).String(), "path", r.RequestURI)
 }
 
 // proxyFile fetches a missing file from a server-suggested origin, streams it
@@ -535,10 +535,10 @@ func (h *HTTPServer) proxyFile(w http.ResponseWriter, r *http.Request, hvf *HVFi
 	}
 	_ = chosen
 	if writeErr != nil {
-		Debug("proxy response interrupted", "bytes", sent, "expected", n, "duration", time.Since(started), "path", r.RequestURI, "err", writeErr)
+		Debug("proxy response interrupted", "bytes", sent, "expected", n, "duration", time.Since(started).String(), "path", r.RequestURI, "err", writeErr)
 		return cached
 	}
-	Info("proxied", "code", 200, "bytes", sent, "expected", n, "duration", time.Since(started), "path", r.RequestURI)
+	Info("proxied", "code", 200, "bytes", sent, "expected", n, "duration", time.Since(started).String(), "path", r.RequestURI)
 	return cached
 }
 
