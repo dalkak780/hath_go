@@ -33,16 +33,17 @@ func InitLog(levelDebug, disableFile bool, logDir string) {
 	encCfg.EncodeTime = zapcore.ISO8601TimeEncoder
 	encCfg.EncodeLevel = zapcore.CapitalLevelEncoder
 
-	var ws zapcore.WriteSyncer = os.Stdout
+	sinks := []zapcore.WriteSyncer{zapcore.AddSync(os.Stdout)}
 	if !disableFile && logDir != "" {
 		if f, err := os.OpenFile(logDir+"/log_all",
 			os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
-			// ponytail: single combined stream (original kept separate out/err).
-			ws = zapcore.AddSync(f)
+			// Keep the file log for compatibility, but never hide container logs.
+			sinks = append(sinks, zapcore.AddSync(f))
 		}
 	}
 
-	core := zapcore.NewCore(zapcore.NewConsoleEncoder(encCfg), ws, level)
+	core := zapcore.NewCore(zapcore.NewConsoleEncoder(encCfg),
+		zapcore.NewMultiWriteSyncer(sinks...), level)
 	logger = zap.New(core, zap.AddCallerSkip(1)).Sugar()
 }
 

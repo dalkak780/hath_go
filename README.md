@@ -101,11 +101,12 @@ services:
   hath:
     image: ${HATH_IMAGE:-ghcr.io/dalkak780/hath_go:latest}
     container_name: hath
-    restart: unless-stopped
+    # Keep this off during migration; enable after one clean startup.
+    restart: "no"
     user: "${PUID:-65532}:${PGID:-65532}"
     environment:
-      HATH_CLIENT_ID: ${HATH_CLIENT_ID:-}
-      HATH_CLIENT_KEY: ${HATH_CLIENT_KEY:-}
+      HATH_CLIENT_ID: "${HATH_CLIENT_ID:?set HATH_CLIENT_ID}"
+      HATH_CLIENT_KEY: "${HATH_CLIENT_KEY:?set HATH_CLIENT_KEY}"
       UMASK: ${UMASK:-022}
       TZ: ${TZ:-UTC}
       EXTRA_ARGS: ${EXTRA_ARGS:-}
@@ -138,6 +139,8 @@ old bind-mount paths:
 ```dotenv
 # Pin this to ghcr.io/dalkak780/hath_go:1.6.5 after the versioned release.
 HATH_IMAGE=ghcr.io/dalkak780/hath_go:latest
+HATH_CLIENT_ID=12345
+HATH_CLIENT_KEY=your-20-character-client-key
 HATH_PORT=12345
 PUID=99
 PGID=100
@@ -156,6 +159,7 @@ docker compose down
 docker compose pull
 docker compose up -d
 docker compose logs -f hath
+# After a clean startup, change restart to: unless-stopped
 ```
 
 `--user`/Compose `user` controls the ownership of newly downloaded cache files;

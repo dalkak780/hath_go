@@ -85,9 +85,10 @@ func TestCertManagerExpiry(t *testing.T) {
 
 func TestCertLoadOrRefresh(t *testing.T) {
 	leaf, key := genCert(t)
-	// LegacyRC2 produces an RC2/3DES bundle that golang.org/x/crypto/pkcs12
-	// (used by cert.go) can decode — standard PKCS#12 interop.
-	p12, err := sslmate.LegacyRC2.Encode(key, leaf, nil, testClientKey)
+	ca, _ := genCert(t)
+	// Java KeyStore exports may include CA safe bags in addition to the leaf
+	// and private key. DecodeChain must accept and preserve those certificates.
+	p12, err := sslmate.LegacyRC2.Encode(key, leaf, []*x509.Certificate{ca}, testClientKey)
 	if err != nil {
 		t.Fatalf("encode p12: %v", err)
 	}
@@ -101,6 +102,9 @@ func TestCertLoadOrRefresh(t *testing.T) {
 	}
 	if cm.leaf == nil || cm.leaf.Subject.CommonName != "hath.network" {
 		t.Fatalf("leaf not parsed: %+v", cm.leaf)
+	}
+	if got := len(cm.cert.Certificate); got != 2 {
+		t.Fatalf("certificate chain length = %d, want 2", got)
 	}
 	if cm.IsExpired() {
 		t.Fatal("fresh cert should not be expired")

@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"golang.org/x/crypto/pkcs12"
+	pkcs12 "software.sslmate.com/src/go-pkcs12"
 )
 
 const certFile = "hathcert.p12"
@@ -38,14 +38,19 @@ func (c *CertManager) LoadOrRefresh(rpc *ServerHandler) error {
 	if err != nil {
 		return err
 	}
-	priv, leaf, err := pkcs12.Decode(p12, c.settings.ClientKey)
+	priv, leaf, caCerts, err := pkcs12.DecodeChain(p12, c.settings.ClientKey)
 	if err != nil {
 		return err
+	}
+	chain := make([][]byte, 0, 1+len(caCerts))
+	chain = append(chain, leaf.Raw)
+	for _, ca := range caCerts {
+		chain = append(chain, ca.Raw)
 	}
 	c.leaf = leaf
 	c.expiry = leaf.NotAfter
 	c.cert = tls.Certificate{
-		Certificate: [][]byte{leaf.Raw},
+		Certificate: chain,
 		PrivateKey:  priv,
 		Leaf:        leaf,
 	}
