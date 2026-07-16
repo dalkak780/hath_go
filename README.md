@@ -88,6 +88,81 @@ The client listens on the port assigned by the server (default `--port`).
 Map it through and make sure it is publicly reachable — the server performs
 a connectivity test at startup and rejects clients it cannot reach.
 
+## Migrate from `frosty5689/hath` (Docker Compose)
+
+Stop the Java container first and **do not use `docker compose down -v`**. Keep
+the existing `cache`, `data`, `download`, `log`, and `tmp` volumes. The Go image
+uses the same paths and reads the existing `/hath/data/client_login` file.
+
+Example Compose configuration:
+
+```yaml
+services:
+  hath:
+    image: ${HATH_IMAGE:-ghcr.io/dalkak780/hath_go:latest}
+    container_name: hath
+    restart: unless-stopped
+    user: "${PUID:-65532}:${PGID:-65532}"
+    environment:
+      HATH_CLIENT_ID: ${HATH_CLIENT_ID:-}
+      HATH_CLIENT_KEY: ${HATH_CLIENT_KEY:-}
+      UMASK: ${UMASK:-022}
+      TZ: ${TZ:-UTC}
+      EXTRA_ARGS: ${EXTRA_ARGS:-}
+    ports:
+      - "${HATH_PORT}:${HATH_PORT}"
+    volumes:
+      - hath-cache:/hath/cache
+      - hath-data:/hath/data
+      - hath-download:/hath/download
+      - hath-log:/hath/log
+      - hath-tmp:/hath/tmp
+
+volumes:
+  hath-cache:
+    name: ${HATH_CACHE_VOLUME:-hath-cache}
+  hath-data:
+    name: ${HATH_DATA_VOLUME:-hath-data}
+  hath-download:
+    name: ${HATH_DOWNLOAD_VOLUME:-hath-download}
+  hath-log:
+    name: ${HATH_LOG_VOLUME:-hath-log}
+  hath-tmp:
+    name: ${HATH_TMP_VOLUME:-hath-tmp}
+```
+
+Create a `.env` beside the Compose file. Set the volume names to the exact
+names used by the old Compose project, or replace the volume entries with the
+old bind-mount paths:
+
+```dotenv
+# Pin this to ghcr.io/dalkak780/hath_go:1.6.5 after the versioned release.
+HATH_IMAGE=ghcr.io/dalkak780/hath_go:latest
+HATH_PORT=12345
+PUID=99
+PGID=100
+HATH_CACHE_VOLUME=oldproject_hath-cache
+HATH_DATA_VOLUME=oldproject_hath-data
+HATH_DOWNLOAD_VOLUME=oldproject_hath-download
+HATH_LOG_VOLUME=oldproject_hath-log
+HATH_TMP_VOLUME=oldproject_hath-tmp
+```
+
+Use the UID/GID that own the existing files, not necessarily `99:100`:
+
+```bash
+docker compose down
+# Back up the five volumes here.
+docker compose pull
+docker compose up -d
+docker compose logs -f hath
+```
+
+`--user`/Compose `user` controls the ownership of newly downloaded cache files;
+it does not repair existing ownership. If the old container used a custom
+`--user`, preserve those numeric IDs in `PUID` and `PGID`. To roll back, stop
+the Go container and restore the old image without deleting the volumes.
+
 ## License
 
 GPL-3.0-or-later. See `LICENSE`.
