@@ -1,5 +1,8 @@
 # hath — Hentai@Home client (Go port)
 
+[![Test](https://github.com/dalkak780/hath/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/dalkak780/hath/actions/workflows/test.yml)
+[![Coverage](https://github.com/dalkak780/hath/actions/workflows/coverage.yml/badge.svg?branch=main)](https://github.com/dalkak780/hath/actions/workflows/coverage.yml)
+
 A Go reimplementation of the Hentai@Home distributed-CDN client.
 
 This is a **derivative work** of [Hentai@Home](https://repo.e-hentai.org/hath/)
@@ -41,11 +44,34 @@ style, e.g. `--cache-dir=/cache --data-dir=/data`.
 docker build -t hath .
 docker run -d --name hath \
   -p 443:443 \
-  -v hath-data:/data -v hath-cache:/cache -v hath-log:/log \
+  -v hath-data:/hath/data \
+  -v hath-cache:/hath/cache \
+  -v hath-log:/hath/log \
+  -v hath-tmp:/hath/tmp \
+  -v hath-download:/hath/download \
+  -e TZ=UTC \
   -e HATH_CLIENT_ID=12345 \
   -e HATH_CLIENT_KEY=.................... \
   hath
 ```
+
+The image runs as non-root UID/GID `65532:65532` by default. For bind mounts
+owned by the host user, map that user directly with Docker's native `--user`:
+
+```bash
+PUID=$(id -u)
+PGID=$(id -g)
+docker run --user "$PUID:$PGID" \
+  -e TZ=Asia/Seoul \
+  ... hath
+```
+
+`PUID` and `PGID` are host/Compose variables used to select Docker's process
+user; they are not privilege-escalation variables inside the image. The image
+does not need a root entrypoint. Ensure bind-mounted
+directories are writable by that UID/GID. Other supported variables are
+`HATH_CLIENT_ID`, `HATH_CLIENT_KEY`, `UMASK` (octal, default `022`), `TZ`
+(default `UTC`), and `EXTRA_ARGS` (additional `--flag=value` arguments).
 
 The client listens on the port assigned by the server (default `--port`).
 Map it through and make sure it is publicly reachable — the server performs

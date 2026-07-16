@@ -10,8 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-
-	"golang.org/x/sys/unix"
 )
 
 // errf is a short fmt.Errorf alias used across the package.
@@ -67,15 +65,4 @@ func validateFileSHA1(path, expected string) bool {
 		return false
 	}
 	return hex.EncodeToString(h.Sum(nil)) == expected
-}
-
-// diskFree returns the free bytes available to unprivileged users on the
-// filesystem holding path. Uses Bavail (not bfree) to match the original
-// getFreeSpace() intent.
-func diskFree(path string) int64 {
-	var s unix.Statfs_t
-	if err := unix.Statfs(path, &s); err != nil {
-		return 1<<63 - 1 // unknown → treat as effectively unlimited
-	}
-	return int64(s.Bavail) * int64(s.Bsize)
 }

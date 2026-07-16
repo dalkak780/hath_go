@@ -1,0 +1,61 @@
+name: Coverage
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.26.5'
+
+jobs:
+  coverage:
+    name: Coverage gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up Go 1.26.5
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Run coverage gate
+        run: make gate
+
+      - name: Publish coverage summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          coverage="$(go tool cover -func=cover.out | awk '$1 == "total:" {print $3}')"
+          {
+            echo '## Coverage'
+            echo
+            echo "**${coverage}** statements covered (85% gate; lifecycle.go and log.go excluded)."
+          } >> "$GITHUB_STEP_SUMMARY"
+          go tool cover -func=cover.out
+
+      - name: Generate HTML report
+        run: go tool cover -html=cover.out -o coverage.html
+
+      - name: Upload coverage artifacts
+        if: ${{ env.ACT != 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: |
+            cover.out
+            coverage.html
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,158 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up Go 1.26.5
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.5'
+          cache: false
+
+      - name: Test
+        run: go test ./...
+
+      - name: Vet
+        run: go vet ./...
+
+  build-unix:
+    name: Build Unix releases
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Set up Go 1.26.5
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.5'
+          cache: false
+
+      - name: Build binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist staging
+          mkdir -p dist staging
+
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            GOOS="${target%/*}"
+            GOARCH="${target#*/}"
+            PACKAGE="hath-${GOOS}-${GOARCH}"
+            mkdir -p "staging/${PACKAGE}"
+
+            for spec in \
+              'hath:./cmd/hath' \
+              'captureproxy:./tools/captureproxy' \
+              'rpcverify:./tools/rpcverify'; do
+              NAME="${spec%%:*}"
+              PATH="${spec#*:}"
+              CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
+                go build -trimpath -ldflags='-s -w -buildid=' \
+                -o "staging/${PACKAGE}/${NAME}" "$PATH"
+            done
+
+            tar -C "staging/${PACKAGE}" -czf "dist/${PACKAGE}.tar.gz" .
+          done
+
+          (cd dist && sha256sum *.tar.gz > checksums-unix.txt)
+          ls -lh dist/
+
+      - name: Upload Unix artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-unix
+          path: dist/
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows release
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Set up Go 1.26.5
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.5'
+          cache: false
+
+      - name: Build binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Remove-Item -Recurse -Force dist, staging -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force dist, staging | Out-Null
+
+          $package = 'hath-windows-amd64'
+          $dir = Join-Path 'staging' $package
+          New-Item -ItemType Directory -Force $dir | Out-Null
+
+          $env:CGO_ENABLED = '0'
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'amd64'
+
+          go build -trimpath -ldflags='-s -w -buildid=' -o (Join-Path $dir 'hath.exe') .\cmd\hath
+          go build -trimpath -ldflags='-s -w -buildid=' -o (Join-Path $dir 'captureproxy.exe') .\tools\captureproxy
+          go build -trimpath -ldflags='-s -w -buildid=' -o (Join-Path $dir 'rpcverify.exe') .\tools\rpcverify
+
+          Compress-Archive -Path (Join-Path $dir '*') -DestinationPath (Join-Path 'dist' "$package.zip")
+          Get-FileHash (Join-Path 'dist' "$package.zip") -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)" } |
+            Set-Content (Join-Path 'dist' 'checksums-windows.txt')
+          Get-ChildItem dist
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs:
+      - build-unix
+      - build-windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

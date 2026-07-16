@@ -1,26 +1,42 @@
 # syntax=docker/dockerfile:1
 
+ARG GO_VERSION=1.26.5
+
 # ---- build stage ----
-FROM golang:1.26-alpine AS build
+# Build on the runner platform and cross-compile for TARGETOS/TARGETARCH.
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build
+ARG TARGETOS
+ARG TARGETARCH
+
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/hath ./cmd/hath
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags='-s -w -buildid=' \
+    -o /out/hath ./cmd/hath
+
+# Keep writable runtime directories in the image without bringing any build
+# tools or source files into the final image.
+RUN mkdir -p /runtime/hath/data /runtime/hath/cache /runtime/hath/log \
+    /runtime/hath/tmp /runtime/hath/download
 
 # ---- runtime stage ----
-FROM alpine:3.21
-RUN apk add --no-cache ca-certificates tzdata \
- && addgroup -S hath && adduser -S -G hath -h /hath hath \
- && mkdir -p /hath/data /hath/cache /hath/log /hath/tmp /hath/download \
- && chown -R hath:hath /hath
-WORKDIR /hath
-USER hath
-COPY --from=build /out/hath /usr/local/bin/hath
+# Distroless contains only the runtime essentials and CA certificates.
+# tzdata is embedded in cmd/hath via time/tzdata, so TZ needs no filesystem
+# payload and can be changed at runtime: docker run -e TZ=Asia/Seoul ...
+FROM gcr.io/distroless/static-debian12:nonroot
 
-# The server assigns the listening port; map it through at run time.
-# Run non-root: the assigned port must be >= 1024, or grant NET_BIND_SERVICE.
+ENV TZ=UTC \
+    UMASK=022
+WORKDIR /hath
+
+COPY --from=build --chown=65532:65532 /out/hath /usr/local/bin/hath
+COPY --from=build --chown=65532:65532 /runtime/hath/ /hath/
+
+USER 65532:65532
 EXPOSE 443
 VOLUME ["/hath/data", "/hath/cache", "/hath/log", "/hath/tmp", "/hath/download"]
 
-ENTRYPOINT ["hath"]
+ENTRYPOINT ["/usr/local/bin/hath"]

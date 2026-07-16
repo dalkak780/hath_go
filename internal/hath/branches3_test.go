@@ -45,8 +45,9 @@ func TestTrackedConnThrottleWrite(t *testing.T) {
 
 func TestGalleryDownloadDirLowSpaceTrue(t *testing.T) {
 	s := NewSettings()
+	s.DownloadDir = t.TempDir()
 	s.SkipFreeSpaceCheck = false
-	s.DiskMinRemaining = 1 << 40 // absurdly high → low space
+	s.DiskMinRemaining = 1 << 62 // larger than any practical filesystem → low space
 	g := &GalleryDownloader{settings: s}
 	if !g.downloadDirLowSpace() {
 		t.Fatal("should report low space with huge DiskMinRemaining")
@@ -70,14 +71,14 @@ func TestServercmdMalformedSegments(t *testing.T) {
 // bufConn is a minimal in-memory net.Conn for trackedConn tests.
 type bufConn struct{ buf bytes.Buffer }
 
-func (c *bufConn) Read(p []byte) (int, error)         { return c.buf.Read(p) }
-func (c *bufConn) Write(p []byte) (int, error)        { return c.buf.Write(p) }
-func (c *bufConn) Close() error                        { return nil }
-func (c *bufConn) LocalAddr() net.Addr                   { return addr{} }
-func (c *bufConn) RemoteAddr() net.Addr                  { return addr{} }
-func (c *bufConn) SetDeadline(time.Time) error         { return nil }
-func (c *bufConn) SetReadDeadline(time.Time) error     { return nil }
-func (c *bufConn) SetWriteDeadline(time.Time) error    { return nil }
+func (c *bufConn) Read(p []byte) (int, error)       { return c.buf.Read(p) }
+func (c *bufConn) Write(p []byte) (int, error)      { return c.buf.Write(p) }
+func (c *bufConn) Close() error                     { return nil }
+func (c *bufConn) LocalAddr() net.Addr              { return addr{} }
+func (c *bufConn) RemoteAddr() net.Addr             { return addr{} }
+func (c *bufConn) SetDeadline(time.Time) error      { return nil }
+func (c *bufConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *bufConn) SetWriteDeadline(time.Time) error { return nil }
 
 type addr struct{}
 
