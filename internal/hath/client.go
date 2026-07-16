@@ -16,6 +16,7 @@ import (
 
 // HathClient ties the subsystems together.
 var certRefreshSleep = 5 * time.Second // overridable in tests to skip the real delay
+var certRestartSleep = time.Second
 
 type HathClient struct {
 	stateMu  sync.Mutex
@@ -87,9 +88,21 @@ func (c *HathClient) Run(ctx context.Context) error {
 
 	c.stats.SetProgramStatus("Sending startup notification...")
 	Info("notifying server that the client is up...")
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	cancelCtx, cancel := watchSignals(sigCh, ctx)
+	defer cancel()
 	if !c.rpc.NotifyStart() {
-		c.doShutdown()
-		return errf("startup notification failed (connectivity test?)")
+		Warn("startup notification failed; listener remains available for diagnostics")
+		select {
+		case <-cancelCtx.Done():
+			c.doShutdown()
+			return nil
+		case err := <-c.serverErr:
+			c.doShutdown()
+			return errf("HTTP listener terminated after startup failure: %v", err)
+		}
 	}
 	c.startupComplete = true
 	c.server.AllowNormalConnections()
@@ -105,14 +118,9 @@ func (c *HathClient) Run(ctx context.Context) error {
 	c.stats.ResetStats() // resetBytesSentHistory equivalent
 	c.stats.ProgramStarted()
 	c.cache.ProcessBlacklist(c.rpc, 259200)
+	c.counter = 1
 
 	Info("startup completed; normal operation")
-
-	// honor SIGINT/SIGTERM in addition to ctx
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	cancelCtx, cancel := watchSignals(sigCh, ctx)
-	defer cancel()
 
 	var lastThreadTime time.Duration
 	for !c.IsShuttingDown() {
@@ -142,8 +150,6 @@ func (c *HathClient) Run(ctx context.Context) error {
 
 		start := time.Now()
 		c.cycle()
-
-		c.counter++
 		lastThreadTime = time.Since(start)
 	}
 	return nil
@@ -162,7 +168,9 @@ func (c *HathClient) cycle() {
 	if !suspendedUntil.IsZero() && suspendedUntil.Before(now) {
 		c.stateMu.Lock()
 		c.suspendedUntil = time.Time{}
+		c.counter = 0
 		c.stateMu.Unlock()
+		c.stats.ProgramResumed()
 		c.rpc.NotifyResume()
 	}
 
@@ -172,10 +180,7 @@ func (c *HathClient) cycle() {
 			c.doCertRefresh = false
 			c.stateMu.Unlock()
 		}
-		return
-	}
-
-	if c.counter%11 == 0 {
+	} else if c.counter%11 == 0 {
 		c.rpc.StillAlive(false)
 	}
 	if c.counter%30 == 1 {
@@ -198,6 +203,7 @@ func (c *HathClient) cycle() {
 
 	c.cache.CycleLRUCacheTable()
 	c.stats.ShiftBytesSentHistory()
+	c.counter++
 }
 
 // watchSignals returns a context cancelled when sigCh fires or ctx is
@@ -226,13 +232,18 @@ func (c *HathClient) startServer() error {
 	if err := c.server.Start(); err != nil {
 		return err
 	}
-	c.serverErr = make(chan error, 1)
+	c.watchServer(c.server)
+	return nil
+}
+
+func (c *HathClient) watchServer(server *HTTPServer) {
+	done := make(chan error, 1)
+	c.serverErr = done
 	go func(server *HTTPServer) {
 		if err := <-server.Done(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			c.serverErr <- err
+			done <- err
 		}
-	}(c.server)
-	return nil
+	}(server)
 }
 
 // refreshCerts restarts the TLS server with a freshly fetched certificate.
@@ -243,15 +254,22 @@ func (c *HathClient) refreshCerts() bool {
 		return false
 	}
 	time.Sleep(certRefreshSleep)
+	c.server.Shutdown()
+	time.Sleep(certRestartSleep)
 	if err := c.cert.LoadOrRefresh(c.rpc); err != nil {
-		Error("cert refresh failed", "err", err)
-		c.rpc.StillAlive(true) // undo server-side suspension; old TLS listener is healthy
+		dieErr("failed to reinitialize HTTPServer certificate: " + err.Error())
 		return false
 	}
-	// TLSConfig.GetCertificate reads the validated certificate dynamically, so
-	// the working listener never needs to be torn down during rotation.
+	server := NewHTTPServer(c.settings, c.cache, c.rpc, c.stats, c.cert, c)
+	if err := server.Start(); err != nil {
+		dieErr("failed to reinitialize HTTPServer: " + err.Error())
+		return false
+	}
+	server.AllowNormalConnections()
+	c.server = server
+	c.watchServer(server)
 	c.rpc.StillAlive(true)
-	Info("internal HTTP server certificate refreshed")
+	Info("internal HTTP server was successfully restarted")
 	return true
 }
 
@@ -290,6 +308,30 @@ func (c *HathClient) IsSuspended() bool {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	return !c.suspendedUntil.IsZero() && c.suspendedUntil.After(time.Now())
+}
+
+// Suspend pauses the master cycle for 1..86400 seconds and notifies the RPC
+// server, matching ClientAPI.clientSuspend in the Java client.
+func (c *HathClient) Suspend(seconds int) bool {
+	c.stateMu.Lock()
+	if seconds < 1 || seconds > 86400 || c.suspendedUntil.After(time.Now()) {
+		c.stateMu.Unlock()
+		return false
+	}
+	c.suspendedUntil = time.Now().Add(time.Duration(seconds) * time.Second)
+	c.stateMu.Unlock()
+	c.stats.ProgramSuspended()
+	return c.rpc.NotifySuspend()
+}
+
+// Resume immediately resumes the master cycle and notifies the RPC server.
+func (c *HathClient) Resume() bool {
+	c.stateMu.Lock()
+	c.suspendedUntil = time.Time{}
+	c.counter = 0
+	c.stateMu.Unlock()
+	c.stats.ProgramResumed()
+	return c.rpc.NotifyResume()
 }
 
 // StartDownloader launches the gallery downloader (servercmd start_downloader).

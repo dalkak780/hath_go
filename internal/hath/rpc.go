@@ -177,6 +177,9 @@ func (h *ServerHandler) fetchOnceBytes(rawurl string, timeout time.Duration) ([]
 	if int64(len(data)) != resp.ContentLength {
 		return nil, fmt.Errorf("short read: got %d want %d", len(data), resp.ContentLength)
 	}
+	if h.stats != nil {
+		h.stats.BytesRcvd(resp.ContentLength)
+	}
 	return data, nil
 }
 
@@ -225,6 +228,9 @@ func (h *ServerHandler) fetchFileURL(rawurl func() string, dest string, timeout 
 			if n != resp.ContentLength {
 				os.Remove(tmp)
 				return fmt.Errorf("short file read: got %d want %d", n, resp.ContentLength)
+			}
+			if h.stats != nil {
+				h.stats.BytesRcvd(n)
 			}
 			return os.Rename(tmp, dest)
 		}()
@@ -589,6 +595,12 @@ func (h *ServerHandler) downloadToFileOnce(rawurl, dest string, timeout time.Dur
 	if resp.ContentLength > 0 && n != resp.ContentLength {
 		os.Remove(tmp)
 		return n, fmt.Errorf("short read: got %d want %d", n, resp.ContentLength)
+	}
+	if h.stats != nil {
+		h.stats.BytesRcvd(n)
+		if isHath {
+			h.stats.FileRcvd()
+		}
 	}
 	return n, os.Rename(tmp, dest)
 }

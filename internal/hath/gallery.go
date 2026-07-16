@@ -412,7 +412,7 @@ func (gf *galleryFile) download(g *GalleryDownloader) int {
 	}
 	gf.state = dlOK
 	if g.stats != nil {
-		g.stats.FileRcvd() // approximates fileRcvd
+		g.stats.FileRcvd()
 	}
 	Info("gallery downloader: downloaded file", "gid", g.gid, "page", gf.page, "name", gf.filename+"."+gf.filetype)
 	return gf.state

@@ -262,7 +262,7 @@ func (s *Settings) applySetting(name, value string) {
 	case "filesystem_blocksize":
 		if bs, err := strconv.ParseInt(value, 10, 64); err != nil {
 			return
-		} else if bs > 0 && bs <= 65536 {
+		} else if bs >= 0 && bs <= 65536 {
 			s.FSBlockSize = bs
 		} else {
 			s.FSBlockSize = 4096

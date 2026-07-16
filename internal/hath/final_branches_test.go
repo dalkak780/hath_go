@@ -50,6 +50,9 @@ func TestRefreshCertsCertLoadFails(t *testing.T) {
 	old := certRefreshSleep
 	certRefreshSleep = 10 * time.Millisecond
 	defer func() { certRefreshSleep = old }()
+	oldRestart := certRestartSleep
+	certRestartSleep = 10 * time.Millisecond
+	defer func() { certRestartSleep = oldRestart }()
 	m, s, rpc := newMockRPC(t)
 	s.DataDir = t.TempDir()
 	m.setResponse(ActClientSuspend, "OK\n")
@@ -70,15 +73,21 @@ func TestRefreshCertsCertLoadFails(t *testing.T) {
 	}
 	c.cert = cm
 	c.server = NewHTTPServer(s, nil, c.rpc, c.stats, cm, c)
-	oldServer := c.server
 	oldPFX, err := os.ReadFile(filepath.Join(s.DataDir, certFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldLeaf := c.cert.leaf
 	m.certBytes = nil // refresh fetch fails
-	if c.refreshCerts() {
-		t.Fatal("failed refresh must request retry")
+	oldFatal := fatalError
+	defer func() { fatalError = oldFatal }()
+	var fatal string
+	fatalError = func(msg string) { fatal = msg; panic(msg) }
+	func() {
+		defer func() { _ = recover() }()
+		c.refreshCerts()
+	}()
+	if fatal == "" {
+		t.Fatal("Java terminates when certificate restart fails")
 	}
 	newPFX, err := os.ReadFile(filepath.Join(s.DataDir, certFile))
 	if err != nil {
@@ -86,9 +95,6 @@ func TestRefreshCertsCertLoadFails(t *testing.T) {
 	}
 	if !bytes.Equal(oldPFX, newPFX) {
 		t.Fatal("failed refresh replaced known-good PFX")
-	}
-	if c.server != oldServer || c.cert.leaf != oldLeaf {
-		t.Fatal("failed refresh replaced working TLS state")
 	}
 	if c.server != nil {
 		c.server.Shutdown()

@@ -110,7 +110,17 @@ func TestServercmdSpeedTestDefault(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		t.Fatalf("speed_test command → 200 (empty default), got %d", resp.StatusCode)
+		t.Fatalf("speed_test command: got %d", resp.StatusCode)
+	}
+	if resp.ContentLength != 1000000 {
+		t.Fatalf("speed_test Content-Length = %d", resp.ContentLength)
+	}
+	if resp.Header.Get("Content-Type") != "application/octet-stream" || resp.Header.Get("Cache-Control") != "public, max-age=31536000" {
+		t.Fatalf("speed_test headers: %v", resp.Header)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || len(body) != 1000000 {
+		t.Fatalf("speed_test body = %d bytes, err=%v", len(body), err)
 	}
 }
 

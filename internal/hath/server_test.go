@@ -158,6 +158,38 @@ func TestServercmdValid(t *testing.T) {
 	}
 }
 
+func TestServercmdHashUsesOriginalCommandCase(t *testing.T) {
+	_, s, _, srv := buildTestServer(t)
+	t0 := s.ServerTime()
+	cmd := "STILL_ALIVE"
+	key := servercmdKey(cmd, "", s.ClientID, t0, s.ClientKey)
+	resp, err := http.Get(srv.URL + "/servercmd/" + cmd + "//" + strconv.FormatInt(t0, 10) + "/" + key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || string(body) != "I feel FANTASTIC and I'm still alive" {
+		t.Fatalf("status=%d body=%q", resp.StatusCode, body)
+	}
+}
+
+func TestJavaErrorResponse(t *testing.T) {
+	_, _, _, srv := buildTestServer(t)
+	resp, err := http.Get(srv.URL + "/missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 404 || string(body) != "An error has occurred. (404)" {
+		t.Fatalf("status=%d body=%q", resp.StatusCode, body)
+	}
+	if resp.Header.Get("Content-Type") != "text/html; charset=ISO-8859-1" || resp.Header.Get("Cache-Control") != "public, max-age=31536000" {
+		t.Fatalf("headers=%v", resp.Header)
+	}
+}
+
 func TestServercmdBadKeyForbidden(t *testing.T) {
 	_, s, _, srv := buildTestServer(t)
 	t0 := s.ServerTime()
@@ -186,6 +218,9 @@ func TestSpeedtestEndpoint(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "public, max-age=31536000" {
+		t.Fatalf("speedtest Cache-Control = %q", got)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	if len(body) != 1024 {
@@ -273,15 +308,14 @@ func TestIsLocal(t *testing.T) {
 }
 
 func TestAdmitDuringStartup(t *testing.T) {
-	hs := &HTTPServer{settings: NewSettings()} // allowNormal false
-	c := &fakeConn{remote: "8.8.8.8:1"}
-	if hs.admit(c) {
-		t.Fatal("non-rpc/non-local should be rejected before allowNormal")
+	hs := &HTTPServer{settings: NewSettings()}
+	if hs.admit(&fakeConn{remote: "8.8.8.8:1"}) {
+		t.Fatal("non-RPC external peer must be rejected during startup")
 	}
 	hs.AllowNormalConnections()
 	hs.settings.DisableFloodControl = true
-	if !hs.admit(c) {
-		t.Fatal("should admit after allowNormal with flood control off")
+	if !hs.admit(&fakeConn{remote: "8.8.8.8:1"}) {
+		t.Fatal("external peer must be admitted after startup")
 	}
 }
 
@@ -290,10 +324,10 @@ func TestAdmitRPCServerBypass(t *testing.T) {
 	s.mu.Lock()
 	s.rpcServers = []net.IP{net.ParseIP("127.0.0.1")}
 	s.mu.Unlock()
-	hs := &HTTPServer{settings: s} // allowNormal false
+	hs := &HTTPServer{settings: s}
 	c := &fakeConn{remote: "127.0.0.1:1"}
 	if !hs.admit(c) {
-		t.Fatal("rpc server should bypass startup gating")
+		t.Fatal("rpc server should bypass normal admission limits")
 	}
 }
 
@@ -307,15 +341,15 @@ func TestParseAdditional(t *testing.T) {
 // fakeConn is a minimal net.Conn for admit() tests.
 type fakeConn struct{ remote string }
 
-func (c *fakeConn) Read([]byte) (int, error)         { return 0, io.EOF }
-func (c *fakeConn) Write([]byte) (int, error)        { return 0, io.EOF }
-func (c *fakeConn) Close() error                     { return nil }
-func (c *fakeConn) LocalAddr() net.Addr              { return nil }
+func (c *fakeConn) Read([]byte) (int, error)  { return 0, io.EOF }
+func (c *fakeConn) Write([]byte) (int, error) { return 0, io.EOF }
+func (c *fakeConn) Close() error              { return nil }
+func (c *fakeConn) LocalAddr() net.Addr       { return nil }
 func (c *fakeConn) RemoteAddr() net.Addr {
 	host, port, _ := net.SplitHostPort(c.remote)
 	p, _ := strconv.Atoi(port)
 	return &net.TCPAddr{IP: net.ParseIP(host), Port: p}
 }
-func (c *fakeConn) SetDeadline(t time.Time) error        { return nil }
-func (c *fakeConn) SetReadDeadline(t time.Time) error    { return nil }
-func (c *fakeConn) SetWriteDeadline(t time.Time) error   { return nil }
+func (c *fakeConn) SetDeadline(t time.Time) error      { return nil }
+func (c *fakeConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *fakeConn) SetWriteDeadline(t time.Time) error { return nil }

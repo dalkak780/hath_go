@@ -8,20 +8,20 @@ import (
 // Stats tracks runtime counters. A direct, mutex-guarded port of the original
 // Stats; the GUI/stat-listener plumbing is dropped (headless-only).
 type Stats struct {
-	mu               sync.Mutex
-	clientRunning    bool
-	clientSuspended  bool
-	programStatus    string
-	clientStartTime  time.Time
+	mu                sync.Mutex
+	clientRunning     bool
+	clientSuspended   bool
+	programStatus     string
+	clientStartTime   time.Time
 	lastServerContact time.Time
-	filesSent        int64
-	filesRcvd        int64
-	bytesSent        int64
-	bytesRcvd        int64
-	cacheCount       int
-	cacheSize        int64
-	bytesSentHistory []int
-	openConnections  int
+	filesSent         int64
+	filesRcvd         int64
+	bytesSent         int64
+	bytesRcvd         int64
+	cacheCount        int
+	cacheSize         int64
+	bytesSentHistory  []int
+	openConnections   int
 }
 
 func NewStats() *Stats {
@@ -57,6 +57,20 @@ func (s *Stats) ProgramStarted() {
 	s.mu.Lock()
 	s.clientStartTime = time.Now()
 	s.clientRunning = true
+	s.programStatus = "Running"
+	s.mu.Unlock()
+}
+
+func (s *Stats) ProgramSuspended() {
+	s.mu.Lock()
+	s.clientSuspended = true
+	s.programStatus = "Suspended"
+	s.mu.Unlock()
+}
+
+func (s *Stats) ProgramResumed() {
+	s.mu.Lock()
+	s.clientSuspended = false
 	s.programStatus = "Running"
 	s.mu.Unlock()
 }

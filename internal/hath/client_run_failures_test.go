@@ -70,7 +70,7 @@ func TestRunFailsOnCertFetch(t *testing.T) {
 	}
 }
 
-func TestRunFailsOnNotifyStart(t *testing.T) {
+func TestRunKeepsListenerAfterNotifyStartFailure(t *testing.T) {
 	c, m, _, _ := baseRunClient(t)
 	leaf, key := genCert(t)
 	p12, err := sslmate.LegacyRC2.Encode(key, leaf, nil, testClientKey)
@@ -79,9 +79,22 @@ func TestRunFailsOnNotifyStart(t *testing.T) {
 	}
 	m.certBytes = p12
 	m.setResponse(ActClientStart, "FAIL_CONNECT_TEST\n")
-	err = runUntilReturn(t, c)
-	if err == nil || (err != nil && !containsStr(err.Error(), "startup notification")) {
-		t.Fatalf("expected startup-notification failure, got %v", err)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+	select {
+	case err := <-done:
+		t.Fatalf("Java keeps the listener alive after connectivity failure, got %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("shutdown after diagnostic wait: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not stop after cancellation")
 	}
 }
 

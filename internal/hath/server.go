@@ -55,6 +55,10 @@ type HTTPServer struct {
 	flood   map[string]*floodEntry
 }
 
+// AllowNormalConnections permits non-RPC, non-local clients after the startup
+// connectivity test succeeds.
+func (h *HTTPServer) AllowNormalConnections() { h.allowNormal.Store(true) }
+
 type floodEntry struct {
 	count        int
 	last         time.Time
@@ -77,10 +81,6 @@ func NewHTTPServer(s *Settings, cache *CacheHandler, rpc *ServerHandler, stats *
 	}
 	return hs
 }
-
-// AllowNormalConnections permits non-RPC, non-local clients (after the startup
-// connectivity test passes).
-func (h *HTTPServer) AllowNormalConnections() { h.allowNormal.Store(true) }
 
 // Start binds synchronously, then begins serving. A successful return proves
 // the port is owned before the client sends client_start.
@@ -135,9 +135,13 @@ func (l *gatingListener) Accept() (net.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
+		if !l.server.admit(c) {
+			c.Close()
+			continue
+		}
 		if tc, ok := c.(*tls.Conn); ok {
-			// force the handshake so RemoteAddr/IP classification is stable and
-			// bad clients fail early, before we count them.
+			// Java applies IP admission before TLS, then the session performs the
+			// handshake. Force it here before counting the connection.
 			_ = tc.SetDeadline(time.Now().Add(10 * time.Second))
 			if err := tc.Handshake(); err != nil {
 				c.Close()
@@ -145,15 +149,12 @@ func (l *gatingListener) Accept() (net.Conn, error) {
 			}
 			_ = tc.SetDeadline(time.Time{})
 		}
-		if l.server.admit(c) {
-			host := stripV6(ipOf(c.RemoteAddr().String()))
-			open := l.server.openConns.Add(1)
-			if l.server.stats != nil {
-				l.server.stats.SetOpenConnections(int(open))
-			}
-			return &trackedConn{Conn: c, server: l.server, throttle: !l.server.isLocal(host), counted: true}, nil
+		host := stripV6(ipOf(c.RemoteAddr().String()))
+		open := l.server.openConns.Add(1)
+		if l.server.stats != nil {
+			l.server.stats.SetOpenConnections(int(open))
 		}
-		c.Close()
+		return &trackedConn{Conn: c, server: l.server, throttle: !l.server.isLocal(host), counted: true}, nil
 	}
 }
 
@@ -170,7 +171,7 @@ func (h *HTTPServer) admit(c net.Conn) bool {
 	if !rpc && !local {
 		max := h.settings.MaxConnections()
 		open := h.openConns.Load()
-		if open >= int64(max) {
+		if open > int64(max) {
 			Warn("exceeded max incoming connections", "max", max)
 			return false
 		}
@@ -220,7 +221,7 @@ func (h *HTTPServer) PruneFloodControl() {
 }
 
 func (h *HTTPServer) isLocal(host string) bool {
-	if h.settings.ClientHost != "" && h.settings.ClientHost == host {
+	if h.settings.ClientHost != "" && stripV6(h.settings.ClientHost) == host {
 		return true
 	}
 	return localNetRe.MatchString(host)
@@ -230,9 +231,10 @@ func (h *HTTPServer) isLocal(host string) bool {
 // non-local traffic.
 type trackedConn struct {
 	net.Conn
-	server   *HTTPServer
-	throttle bool
-	counted  bool
+	server    *HTTPServer
+	throttle  bool
+	counted   bool
+	closeOnce sync.Once
 }
 
 func (t *trackedConn) Write(p []byte) (int, error) {
@@ -258,12 +260,14 @@ func (t *trackedConn) Read(b []byte) (int, error) {
 }
 
 func (t *trackedConn) Close() error {
-	if t.counted {
-		open := t.server.openConns.Add(-1)
-		if t.server.stats != nil {
-			t.server.stats.SetOpenConnections(int(open))
+	t.closeOnce.Do(func() {
+		if t.counted {
+			open := t.server.openConns.Add(-1)
+			if t.server.stats != nil {
+				t.server.stats.SetOpenConnections(int(open))
+			}
 		}
-	}
+	})
 	return t.Conn.Close()
 }
 
@@ -275,7 +279,7 @@ func (h *HTTPServer) handle(w http.ResponseWriter, r *http.Request) {
 	r.Close = true
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET,HEAD")
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		h.empty(w, http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -305,11 +309,14 @@ func (h *HTTPServer) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		if len(segments) == 2 && segments[1] == "favicon.ico" {
 			w.Header().Set("Location", "https://e-hentai.org/favicon.ico")
+			w.Header().Set("Content-Type", "text/html; charset=ISO-8859-1")
 			w.WriteHeader(http.StatusMovedPermanently)
 			return
 		}
 		if len(segments) == 2 && segments[1] == "robots.txt" {
-			w.Header().Set("Content-Type", "text/plain")
+			w.Header().Set("Content-Type", "text/plain; charset=ISO-8859-1")
+			w.Header().Set("Cache-Control", "public, max-age=31536000")
+			w.Header().Set("Content-Length", "25")
 			w.Write([]byte("User-agent: *\nDisallow: /"))
 			return
 		}
@@ -475,32 +482,33 @@ func (h *HTTPServer) proxyFile(w http.ResponseWriter, r *http.Request, hvf *HVFi
 // handleServerCmd serves /servercmd/{cmd}/{add}/{time}/{key}.
 func (h *HTTPServer) handleServerCmd(w http.ResponseWriter, r *http.Request, seg []string) {
 	if !h.settings.IsValidRPCServer(net.ParseIP(ipOf(r.RemoteAddr))) {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+		h.empty(w, http.StatusForbidden)
 		return
 	}
 	if len(seg) < 6 {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+		h.empty(w, http.StatusForbidden)
 		return
 	}
-	cmd := strings.ToLower(seg[2])
+	rawCmd := seg[2]
+	cmd := strings.ToLower(rawCmd)
 	add := seg[3]
 	t, err := strconv.ParseInt(seg[4], 10, 64)
 	if err != nil {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+		h.empty(w, http.StatusForbidden)
 		return
 	}
 	key := seg[5]
 	if abs64(h.settings.ServerTime()-t) > MaxKeyTimeDrift ||
-		!strings.EqualFold(servercmdKey(cmd, add, h.settings.ClientID, t, h.settings.ClientKey), key) {
+		!strings.EqualFold(servercmdKey(rawCmd, add, h.settings.ClientID, t, h.settings.ClientKey), key) {
 		Debug("servercmd bad/expired key")
-		http.Error(w, "Forbidden", http.StatusForbidden)
+		h.empty(w, http.StatusForbidden)
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Content-Type", "text/html; charset=ISO-8859-1")
 	switch cmd {
 	case "still_alive":
-		w.Write([]byte("I feel FANTASTIC and I'm still alive"))
+		h.writeText(w, "I feel FANTASTIC and I'm still alive")
 	case "refresh_settings":
 		if h.client != nil {
 			h.client.TriggerRefreshSettings()
@@ -514,11 +522,21 @@ func (h *HTTPServer) handleServerCmd(w http.ResponseWriter, r *http.Request, seg
 			h.client.StartDownloader()
 		}
 	case "threaded_proxy_test":
+		w.Header().Set("Cache-Control", "public, max-age=31536000")
 		h.runThreadedProxyTest(w, add)
 	case "speed_test":
-		// server-initiated speedtest; full outbound test is threaded_proxy_test
+		size := int64(1000000)
+		if v := parseAdditional(add)["testsize"]; v != "" {
+			var err error
+			size, err = strconv.ParseInt(v, 10, 32)
+			if err != nil {
+				h.writeText(w, "INVALID_COMMAND")
+				return
+			}
+		}
+		h.writeSpeedtest(w, r, size)
 	default:
-		w.Write([]byte("INVALID_COMMAND"))
+		h.writeText(w, "INVALID_COMMAND")
 	}
 }
 
@@ -543,8 +561,18 @@ func (h *HTTPServer) handleSpeedtest(w http.ResponseWriter, r *http.Request, seg
 		h.empty(w, http.StatusForbidden)
 		return
 	}
+	h.writeSpeedtest(w, r, size)
+}
+
+func (h *HTTPServer) writeSpeedtest(w http.ResponseWriter, r *http.Request, size int64) {
+	if h.stats != nil {
+		h.stats.SetProgramStatus("Running speed tests...")
+	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	if size > 0 {
+		w.Header().Set("Cache-Control", "public, max-age=31536000")
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	}
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {
 		return
@@ -566,8 +594,20 @@ func (h *HTTPServer) handleSpeedtest(w http.ResponseWriter, r *http.Request, seg
 }
 
 func (h *HTTPServer) empty(w http.ResponseWriter, code int) {
-	w.Header().Set("Content-Type", "text/html; charset=iso-8859-1")
+	w.Header().Set("Content-Type", "text/html; charset=ISO-8859-1")
+	body := []byte(fmt.Sprintf("An error has occurred. (%d)", code))
+	w.Header().Set("Cache-Control", "public, max-age=31536000")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(code)
+	_, _ = w.Write(body)
+}
+
+func (h *HTTPServer) writeText(w http.ResponseWriter, body string) {
+	if body != "" {
+		w.Header().Set("Cache-Control", "public, max-age=31536000")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	}
+	_, _ = io.WriteString(w, body)
 }
 
 // parseAdditional splits a ";k=v;k=v" string into a map.
@@ -644,8 +684,8 @@ func (h *HTTPServer) runThreadedProxyTest(w http.ResponseWriter, add string) {
 				return
 			}
 			defer resp.Body.Close()
-			io.Copy(io.Discard, resp.Body)
-			if resp.ContentLength > 0 && resp.ContentLength >= parseLen(testsize) {
+			n, readErr := io.Copy(io.Discard, resp.Body)
+			if readErr == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && n == resp.ContentLength && resp.ContentLength >= parseLen(testsize) {
 				mu.Lock()
 				success++
 				total += time.Since(start).Milliseconds()
@@ -655,13 +695,13 @@ func (h *HTTPServer) runThreadedProxyTest(w http.ResponseWriter, add string) {
 	}
 	wg.Wait()
 	Debug("ran threaded proxy test", "hostname", hostname, "success", success, "totalMs", total)
-	w.Write([]byte(fmt.Sprintf("OK:%d-%d", success, total)))
+	h.writeText(w, fmt.Sprintf("OK:%d-%d", success, total))
 }
 
-func randInt31() int32 {
+func randInt31() int64 {
 	var b [4]byte
 	rand.Read(b[:])
-	return int32(uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3]))
+	return int64(uint32(b[0])<<24|uint32(b[1])<<16|uint32(b[2])<<8|uint32(b[3])) & 0x7fffffff
 }
 
 func parseLen(s string) int64 {
