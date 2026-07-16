@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing version tag to release, for example v1.6.5
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -12,6 +18,9 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  RELEASE_TAG: ${{ inputs.version || github.ref_name }}
+
 jobs:
   verify:
     name: Verify
@@ -19,6 +28,8 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.version || github.ref }}
 
       - name: Set up Go 1.26.5
         uses: actions/setup-go@v7
@@ -40,7 +51,7 @@ jobs:
       - name: Check out
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ inputs.version || github.ref }}
 
       - name: Set up Go 1.26.5
         uses: actions/setup-go@v7
@@ -55,7 +66,7 @@ jobs:
           rm -rf dist staging
           mkdir -p dist staging
 
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
             GOOS="${target%/*}"
             GOARCH="${target#*/}"
@@ -94,7 +105,7 @@ jobs:
       - name: Check out
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ inputs.version || github.ref }}
 
       - name: Set up Go 1.26.5
         uses: actions/setup-go@v7
@@ -109,7 +120,7 @@ jobs:
           Remove-Item -Recurse -Force dist, staging -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force dist, staging | Out-Null
 
-          $version = $env:GITHUB_REF_NAME
+          $version = $env:RELEASE_TAG
           if ($version.StartsWith('v')) { $version = $version.Substring(1) }
           $package = "hath-$version-windows-amd64"
           $dir = Join-Path 'staging' $package
@@ -155,7 +166,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" dist/* \
+          gh release create "$RELEASE_TAG" dist/* \
             --repo "$GITHUB_REPOSITORY" \
-            --title "$GITHUB_REF_NAME" \
+            --title "$RELEASE_TAG" \
+            --verify-tag \
             --generate-notes
