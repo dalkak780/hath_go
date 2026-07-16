@@ -5,8 +5,11 @@ package hath
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -15,6 +18,7 @@ import (
 var certRefreshSleep = 5 * time.Second // overridable in tests to skip the real delay
 
 type HathClient struct {
+	stateMu  sync.Mutex
 	settings *Settings
 	stats    *Stats
 	rpc      *ServerHandler
@@ -22,11 +26,13 @@ type HathClient struct {
 	cert     *CertManager
 	server   *HTTPServer
 
-	suspendedUntil time.Time
-	doCertRefresh  bool
-	counter        int
-	shutdown       bool
-	gallery        *GalleryDownloader
+	suspendedUntil  time.Time
+	doCertRefresh   bool
+	counter         int
+	shutdown        bool
+	gallery         *GalleryDownloader
+	serverErr       chan error
+	startupComplete bool
 }
 
 // NewHathClient builds a client with the given settings/stats.
@@ -38,7 +44,11 @@ func NewHathClient(s *Settings, stats *Stats) *HathClient {
 func (c *HathClient) TriggerRefreshSettings() { c.rpc.RefreshServerSettings() }
 
 // TriggerCertRefresh schedules a TLS restart to pick up a fresh cert.
-func (c *HathClient) TriggerCertRefresh() { c.doCertRefresh = true }
+func (c *HathClient) TriggerCertRefresh() {
+	c.stateMu.Lock()
+	c.doCertRefresh = true
+	c.stateMu.Unlock()
+}
 
 // Run performs startup then the periodic loop until ctx is cancelled.
 func (c *HathClient) Run(ctx context.Context) error {
@@ -78,8 +88,10 @@ func (c *HathClient) Run(ctx context.Context) error {
 	c.stats.SetProgramStatus("Sending startup notification...")
 	Info("notifying server that the client is up...")
 	if !c.rpc.NotifyStart() {
+		c.doShutdown()
 		return errf("startup notification failed (connectivity test?)")
 	}
+	c.startupComplete = true
 	c.server.AllowNormalConnections()
 
 	if c.settings.WarnNewClient {
@@ -103,15 +115,18 @@ func (c *HathClient) Run(ctx context.Context) error {
 	defer cancel()
 
 	var lastThreadTime time.Duration
-	for !c.shutdown {
+	for !c.IsShuttingDown() {
 		select {
 		case <-cancelCtx.Done():
 			c.doShutdown()
 			return nil
+		case err := <-c.serverErr:
+			c.doShutdown()
+			return errf("HTTP listener terminated: %v", err)
 		default:
 		}
 
-		sleep := time.Duration(10000-lastThreadTime.Milliseconds())
+		sleep := time.Duration(10000 - lastThreadTime.Milliseconds())
 		if sleep < 1000 {
 			sleep = 1000
 		}
@@ -119,6 +134,9 @@ func (c *HathClient) Run(ctx context.Context) error {
 		case <-cancelCtx.Done():
 			c.doShutdown()
 			return nil
+		case err := <-c.serverErr:
+			c.doShutdown()
+			return errf("HTTP listener terminated: %v", err)
 		case <-time.After(sleep):
 		}
 
@@ -134,17 +152,26 @@ func (c *HathClient) Run(ctx context.Context) error {
 // cycle runs one pass of scheduled tasks (mirrors HentaiAtHomeClient.run loop).
 func (c *HathClient) cycle() {
 	now := time.Now()
-	if !c.suspendedUntil.IsZero() && c.suspendedUntil.After(now) {
+	c.stateMu.Lock()
+	suspendedUntil := c.suspendedUntil
+	refresh := c.doCertRefresh
+	c.stateMu.Unlock()
+	if !suspendedUntil.IsZero() && suspendedUntil.After(now) {
 		return
 	}
-	if !c.suspendedUntil.IsZero() && c.suspendedUntil.Before(now) {
+	if !suspendedUntil.IsZero() && suspendedUntil.Before(now) {
+		c.stateMu.Lock()
 		c.suspendedUntil = time.Time{}
+		c.stateMu.Unlock()
 		c.rpc.NotifyResume()
 	}
 
-	if c.doCertRefresh {
-		c.refreshCerts()
-		c.doCertRefresh = false
+	if refresh {
+		if c.refreshCerts() {
+			c.stateMu.Lock()
+			c.doCertRefresh = false
+			c.stateMu.Unlock()
+		}
 		return
 	}
 
@@ -152,7 +179,7 @@ func (c *HathClient) cycle() {
 		c.rpc.StillAlive(false)
 	}
 	if c.counter%30 == 1 {
-		if abs64(c.settings.serverTimeDelta) > 86400 {
+		if abs64(c.settings.ServerTimeDelta()) > 86400 {
 			Warn("system time appears off by more than 24h")
 		}
 		if c.server.CertExpired() {
@@ -189,52 +216,51 @@ func watchSignals(sigCh <-chan os.Signal, ctx context.Context) (context.Context,
 	return cancelCtx, cancel
 }
 
-// startServer fetches the cert and starts the TLS server in a goroutine.
+// startServer fetches the cert and binds the TLS listener synchronously.
 func (c *HathClient) startServer() error {
 	c.cert = &CertManager{settings: c.settings}
 	if err := c.cert.LoadOrRefresh(c.rpc); err != nil {
 		return err
 	}
 	c.server = NewHTTPServer(c.settings, c.cache, c.rpc, c.stats, c.cert, c)
-	go func() {
-		if err := c.server.Start(); err != nil {
-			Error("http server exited", "err", err)
+	if err := c.server.Start(); err != nil {
+		return err
+	}
+	c.serverErr = make(chan error, 1)
+	go func(server *HTTPServer) {
+		if err := <-server.Done(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			c.serverErr <- err
 		}
-	}()
-	// give the listener a moment to bind / surface errors
-	time.Sleep(200 * time.Millisecond)
+	}(c.server)
 	return nil
 }
 
 // refreshCerts restarts the TLS server with a freshly fetched certificate.
-func (c *HathClient) refreshCerts() {
+func (c *HathClient) refreshCerts() bool {
 	Info("internal restart of HTTP server to refresh certs")
 	if !c.rpc.NotifySuspend() {
 		Warn("failed to suspend for cert refresh; will retry")
-		return
+		return false
 	}
 	time.Sleep(certRefreshSleep)
-	c.server.Shutdown()
 	if err := c.cert.LoadOrRefresh(c.rpc); err != nil {
 		Error("cert refresh failed", "err", err)
-		return
+		c.rpc.StillAlive(true) // undo server-side suspension; old TLS listener is healthy
+		return false
 	}
-	// spin up a new server with the fresh cert
-	c.server = NewHTTPServer(c.settings, c.cache, c.rpc, c.stats, c.cert, c)
-	go func() {
-		if err := c.server.Start(); err != nil {
-			Error("http server exited on restart", "err", err)
-		}
-	}()
-	c.server.AllowNormalConnections()
+	// TLSConfig.GetCertificate reads the validated certificate dynamically, so
+	// the working listener never needs to be torn down during rotation.
 	c.rpc.StillAlive(true)
-	Info("internal HTTP server restarted")
+	Info("internal HTTP server certificate refreshed")
+	return true
 }
 
 func (c *HathClient) doShutdown() {
-	c.shutdown = true
+	c.requestShutdown()
 	Info("shutting down...")
-	c.rpc.NotifyStop()
+	if c.startupComplete {
+		c.rpc.NotifyStop()
+	}
 	if c.server != nil {
 		c.server.Shutdown()
 	}
@@ -246,19 +272,42 @@ func (c *HathClient) doShutdown() {
 	}
 }
 
+func (c *HathClient) requestShutdown() {
+	c.stateMu.Lock()
+	c.shutdown = true
+	c.stateMu.Unlock()
+}
+
 // IsShuttingDown reports whether shutdown has been requested.
-func (c *HathClient) IsShuttingDown() bool { return c.shutdown }
+func (c *HathClient) IsShuttingDown() bool {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	return c.shutdown
+}
 
 // IsSuspended reports whether the master thread is currently suspended.
 func (c *HathClient) IsSuspended() bool {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
 	return !c.suspendedUntil.IsZero() && c.suspendedUntil.After(time.Now())
 }
 
 // StartDownloader launches the gallery downloader (servercmd start_downloader).
 func (c *HathClient) StartDownloader() {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
 	if c.gallery == nil {
-		c.gallery = NewGalleryDownloader(c)
+		c.gallery = newGalleryDownloader(c)
+		go c.gallery.loop()
 	}
+}
+
+func (c *HathClient) galleryDone(g *GalleryDownloader) {
+	c.stateMu.Lock()
+	if c.gallery == g {
+		c.gallery = nil
+	}
+	c.stateMu.Unlock()
 }
 
 func (c *HathClient) applyLoginEnv() {

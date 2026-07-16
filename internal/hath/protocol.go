@@ -147,6 +147,9 @@ func ParseHVFile(fileid string) *HVFile {
 	parts := strings.Split(fileid, "-")
 	hash := parts[0]
 	size, _ := strconv.ParseInt(parts[1], 10, 64)
+	if size > int64(^uint32(0)>>1) {
+		return nil
+	}
 	f := &HVFile{Hash: hash, Size: size}
 	if len(parts) == 3 {
 		f.Type = parts[2]

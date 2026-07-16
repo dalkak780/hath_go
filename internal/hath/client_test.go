@@ -41,7 +41,7 @@ func TestHathClientShutdownFlag(t *testing.T) {
 	if c.IsShuttingDown() {
 		t.Fatal("should not be shutting down")
 	}
-	c.shutdown = true
+	c.requestShutdown()
 	if !c.IsShuttingDown() {
 		t.Fatal("should be shutting down")
 	}
@@ -71,7 +71,7 @@ func TestHathClientStartDownloaderNoPanic(t *testing.T) {
 	// We only assert it does not panic and sets the field.
 	c.StartDownloader()
 	// give it a moment then mark shutdown so the loop exits
-	c.shutdown = true
+	c.requestShutdown()
 	time.Sleep(50 * time.Millisecond)
 }
 

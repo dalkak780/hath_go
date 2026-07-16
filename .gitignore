@@ -25,6 +25,7 @@ coverage.out
 
 # capture artifacts
 rpc_capture.jsonl
+pfx-report.json
 rpc.pcap
 *.pcap
 cover.out

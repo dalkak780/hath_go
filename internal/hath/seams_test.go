@@ -2,6 +2,8 @@ package hath
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"net/http"
 	"os"
 	"strconv"
@@ -41,6 +43,31 @@ func TestStartBindFailure(t *testing.T) {
 	hs := &HTTPServer{settings: s, cert: &CertManager{settings: s}}
 	if err := hs.Start(); err == nil {
 		t.Fatal("expected bind error for invalid port")
+	}
+}
+
+func TestUnexpectedListenerDeathIsReported(t *testing.T) {
+	leaf, key := genCert(t)
+	s := NewSettings()
+	s.ClientPort = 0
+	hs := &HTTPServer{
+		settings: s,
+		cert:     &CertManager{settings: s, cert: tls.Certificate{Certificate: [][]byte{leaf.Raw}, PrivateKey: key}},
+		flood:    make(map[string]*floodEntry),
+	}
+	if err := hs.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := hs.listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-hs.Done():
+		if err == nil || errors.Is(err, http.ErrServerClosed) {
+			t.Fatalf("unexpected termination not reported: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listener death was not reported")
 	}
 }
 

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Existing version tag to release, for example v1.6.5
+        description: Existing version tag to release, for example v1.6.5-go.1
         required: true
         type: string
 
@@ -76,7 +76,8 @@ jobs:
             for spec in \
               'hath:./cmd/hath' \
               'captureproxy:./tools/captureproxy' \
-              'rpcverify:./tools/rpcverify'; do
+              'rpcverify:./tools/rpcverify' \
+              'pfxinspect:./tools/pfxinspect'; do
               NAME="${spec%%:*}"
               PATH="${spec#*:}"
               CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
@@ -133,6 +134,7 @@ jobs:
           go build -trimpath -ldflags='-s -w -buildid=' -o (Join-Path $dir 'hath.exe') .\cmd\hath
           go build -trimpath -ldflags='-s -w -buildid=' -o (Join-Path $dir 'captureproxy.exe') .\tools\captureproxy
           go build -trimpath -ldflags='-s -w -buildid=' -o (Join-Path $dir 'rpcverify.exe') .\tools\rpcverify
+          go build -trimpath -ldflags='-s -w -buildid=' -o (Join-Path $dir 'pfxinspect.exe') .\tools\pfxinspect
 
           Compress-Archive -Path (Join-Path $dir '*') -DestinationPath (Join-Path 'dist' "$package.zip")
           Get-FileHash (Join-Path 'dist' "$package.zip") -Algorithm SHA256 |
@@ -166,8 +168,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          RELEASE_FLAGS=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            RELEASE_FLAGS+=(--prerelease)
+          fi
           gh release create "$RELEASE_TAG" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "$RELEASE_TAG" \
             --verify-tag \
-            --generate-notes
+            --generate-notes \
+            "${RELEASE_FLAGS[@]}"

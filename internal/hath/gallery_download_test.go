@@ -62,6 +62,6 @@ func TestGalleryDownloadLoop(t *testing.T) {
 		t.Fatalf("gallery not fully downloaded (file+galleryinfo) at %s", dest)
 	}
 	// stop the downloader loop
-	client.shutdown = true
+	client.requestShutdown()
 	time.Sleep(100 * time.Millisecond)
 }

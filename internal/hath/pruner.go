@@ -6,17 +6,19 @@ package hath
 // the client down if the device drops below the safety threshold.
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
 // CachePruner runs the prune/disk-watch loop in its own goroutine.
 type CachePruner struct {
-	cache   *CacheHandler
-	client  *HathClient
-	freq    atomic.Int64 // seconds between periodic checks
-	diskInt int          // ticks between free-disk watchdogs (0 = every tick)
-	stopCh  chan struct{}
+	cache    *CacheHandler
+	client   *HathClient
+	freq     atomic.Int64 // seconds between periodic checks
+	diskInt  int          // ticks between free-disk watchdogs (0 = every tick)
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // diskCheckTicks is the number of 1s ticks between free-disk watchdogs.
@@ -25,10 +27,10 @@ const defaultDiskCheckTicks = 300
 
 func newCachePruner(cache *CacheHandler, client *HathClient) *CachePruner {
 	p := &CachePruner{
-		cache:  cache,
-		client: client,
+		cache:   cache,
+		client:  client,
 		diskInt: defaultDiskCheckTicks,
-		stopCh: make(chan struct{}),
+		stopCh:  make(chan struct{}),
 	}
 	p.freq.Store(60)
 	go p.loop()
@@ -66,30 +68,30 @@ func (p *CachePruner) loop() {
 				}
 			}()
 
-			cacheLimit := p.cache.settings.DiskLimit
-		cacheSize := p.cache.CacheSizeWithOverhead()
+			cacheLimit := p.cache.settings.DiskLimitBytes()
+			cacheSize := p.cache.CacheSizeWithOverhead()
 
-		if cacheSize > cacheLimit {
-			Info("cache handler: cache over limit, pruning aggressively",
-				"pctOver", 100.0*float64(cacheSize)/float64(cacheLimit)-100.0)
-			p.cache.CheckAndPruneCache()
-			return
-		}
-
-		cacheCheckTicks++
-		if cacheCheckTicks > int(p.freq.Load()) {
-			p.cache.CheckAndPruneCache()
-			cacheCheckTicks = 0
-		}
-
-		diskCheckTicks++
-		if diskCheckTicks > p.diskInt {
-			if !p.cache.HasFreeDiskSpace() {
-				dieErr("free disk space dropped below the minimum threshold; free space or reduce cache size at https://e-hentai.org/hentaiathome.php?cid=" +
-					itoa(p.cache.settings.ClientID))
+			if cacheSize > cacheLimit {
+				Info("cache handler: cache over limit, pruning aggressively",
+					"pctOver", 100.0*float64(cacheSize)/float64(cacheLimit)-100.0)
+				p.cache.CheckAndPruneCache()
+				return
 			}
-			diskCheckTicks = 0
-		}
+
+			cacheCheckTicks++
+			if cacheCheckTicks > int(p.freq.Load()) {
+				p.cache.CheckAndPruneCache()
+				cacheCheckTicks = 0
+			}
+
+			diskCheckTicks++
+			if diskCheckTicks > p.diskInt {
+				if !p.cache.HasFreeDiskSpace() {
+					dieErr("free disk space dropped below the minimum threshold; free space or reduce cache size at https://e-hentai.org/hentaiathome.php?cid=" +
+						itoa(p.cache.settings.ClientID))
+				}
+				diskCheckTicks = 0
+			}
 		}()
 	}
 }
@@ -97,10 +99,6 @@ func (p *CachePruner) loop() {
 // stop ends the pruner loop (called on shutdown).
 func (p *CachePruner) stop() {
 	if p != nil {
-		select {
-		case <-p.stopCh:
-		default:
-			close(p.stopCh)
-		}
+		p.stopOnce.Do(func() { close(p.stopCh) })
 	}
 }

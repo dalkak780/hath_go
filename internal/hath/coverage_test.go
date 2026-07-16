@@ -156,7 +156,9 @@ func TestThreadedProxyTestCommand(t *testing.T) {
 // TestPrunerLoopPrunes: an over-limit cache is pruned by the pruner goroutine.
 func TestPrunerLoopPrunes(t *testing.T) {
 	ch, s := buildCache(t)
+	s.mu.Lock()
 	s.DiskLimit = 1
+	s.mu.Unlock()
 	f := ParseHVFile("abcdef0123456789abcdef0123456789abcdef01-5-jpg")
 	src := filepath.Join(ch.settings.TempDir, "src")
 	os.WriteFile(src, []byte("hello"), 0o644)
@@ -246,7 +248,12 @@ func TestRefreshCerts(t *testing.T) {
 
 type zeroReader struct{}
 
-func (zeroReader) Read(p []byte) (int, error) { for i := range p { p[i] = 0 }; return len(p), nil }
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
+}
 
 func portOf(u string) int {
 	_, p, _ := splitHP(u)
@@ -264,4 +271,3 @@ func splitOnce(s, sep string) (string, string, error) {
 	}
 	return s[:i], s[i+1:], nil
 }
-

@@ -26,19 +26,19 @@ const (
 
 // persistentCache is serialized to data/pcache for fast startup.
 type persistentCache struct {
-	Count            int64
-	Size             int64
-	LRUClearPointer  int
-	LRU              []uint16
+	Count             int64
+	Size              int64
+	LRUClearPointer   int
+	LRU               []uint16
 	StaticRangeOldest map[string]int64
 }
 
 // CacheHandler manages cached files.
 type CacheHandler struct {
-	client  *HathClient
+	client   *HathClient
 	settings *Settings
-	stats   *Stats
-	pruner  *CachePruner
+	stats    *Stats
+	pruner   *CachePruner
 
 	mu                sync.Mutex
 	cacheCount        int64
@@ -75,30 +75,16 @@ func NewCacheHandler(c *HathClient) (*CacheHandler, error) {
 		}
 	}
 
-	fast := false
-	if !s.RescanCache && ch.loadPersistent() {
-		Info("cache handler: loaded persistent cache data")
-		fast = true
+	// The filesystem is authoritative. A snapshot can be stale after an
+	// unclean exit, so trusting one can resurrect deleted entries or omit
+	// completed imports. Scanning also accepts an existing Java cache directly.
+	Info("cache handler: initializing the cache system...")
+	ch.startupCacheCleanup()
+	if c.IsShuttingDown() {
+		return ch, nil
 	}
-	os.Remove(ch.persistentPath()) // info is consumed; rewritten on terminate
-
-	if !fast {
-		Info("cache handler: initializing the cache system...")
-		ch.startupCacheCleanup()
-		if c.IsShuttingDown() {
-			return ch, nil
-		}
-		// zero out in case of a partially-failed persistent load
-		ch.mu.Lock()
-		ch.lruClearPointer = 0
-		ch.cacheCount = 0
-		ch.cacheSize = 0
-		ch.staticRangeOldest = make(map[string]int64)
-		ch.mu.Unlock()
-		if err := ch.startupInitCache(); err != nil {
-			return nil, err
-		}
-		ch.savePersistent()
+	if err := ch.startupInitCache(); err != nil {
+		return nil, err
 	}
 	ch.updateStats()
 
@@ -184,6 +170,12 @@ func (c *CacheHandler) IsFileVerificationOnCooldown() bool {
 
 // VerifyFile checks the SHA-1 of a cached file against its id.
 func (c *CacheHandler) VerifyFile(f *HVFile) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.verifyFileLocked(f)
+}
+
+func (c *CacheHandler) verifyFileLocked(f *HVFile) bool {
 	h := sha1.New()
 	fl, err := os.Open(c.LocalPath(f))
 	if err != nil {
@@ -194,6 +186,27 @@ func (c *CacheHandler) VerifyFile(f *HVFile) bool {
 		return false
 	}
 	return hex.EncodeToString(h.Sum(nil)) == f.Hash
+}
+
+// DeleteIfCorrupt verifies and removes the same path under one lock, so a
+// concurrent import cannot be mistaken for the file that was checked.
+func (c *CacheHandler) DeleteIfCorrupt(f *HVFile) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.verifyFileLocked(f) {
+		return false
+	}
+	if err := os.Remove(c.LocalPath(f)); err != nil {
+		return false
+	}
+	c.cacheCount--
+	c.cacheSize -= f.Size
+	c.updateStatsLocked()
+	if dir := filepath.Dir(c.LocalPath(f)); dirIsEmpty(dir) {
+		os.Remove(dir)
+		delete(c.staticRangeOldest, f.StaticRange())
+	}
+	return true
 }
 
 // DeleteFileFromCache removes a file and decrements counters.
@@ -214,10 +227,16 @@ func (c *CacheHandler) DeleteFileFromCache(f *HVFile) {
 
 // ImportFileToCache moves a validated temp file into the cache and counts it.
 func (c *CacheHandler) ImportFileToCache(tempPath string, f *HVFile) bool {
+	c.mu.Lock()
+	if fi, err := os.Stat(c.LocalPath(f)); err == nil && fi.Size() == f.Size {
+		os.Remove(tempPath)
+		c.mu.Unlock()
+		return true
+	}
 	if !c.moveFileToCacheDir(tempPath, f) {
+		c.mu.Unlock()
 		return false
 	}
-	c.mu.Lock()
 	c.cacheCount++
 	c.cacheSize += f.Size
 	if _, ok := c.staticRangeOldest[f.StaticRange()]; !ok {
@@ -231,7 +250,7 @@ func (c *CacheHandler) ImportFileToCache(tempPath string, f *HVFile) bool {
 
 func (c *CacheHandler) moveFileToCacheDir(src string, f *HVFile) bool {
 	dst := c.LocalPath(f)
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o777); err != nil {
 		return false
 	}
 	if err := os.Rename(src, dst); err != nil {
@@ -505,6 +524,7 @@ func (c *CacheHandler) startupInitCache() error {
 			return
 		}
 		oldest := time.Now().UnixMilli()
+		validFiles := 0
 		for _, fe := range files {
 			fi, err := fe.Info()
 			if err != nil {
@@ -532,6 +552,7 @@ func (c *CacheHandler) startupInitCache() error {
 			c.cacheCount++
 			c.cacheSize += f.Size
 			c.mu.Unlock()
+			validFiles++
 			lm := fi.ModTime().UnixMilli()
 			if lm > cutoff {
 				c.MarkRecentlyAccessed(f)
@@ -540,10 +561,14 @@ func (c *CacheHandler) startupInitCache() error {
 				oldest = lm
 			}
 		}
-		c.mu.Lock()
-		c.staticRangeOldest[l1+l2] = oldest
-		c.mu.Unlock()
-		foundRanges++
+		if validFiles > 0 {
+			c.mu.Lock()
+			c.staticRangeOldest[l1+l2] = oldest
+			c.mu.Unlock()
+			foundRanges++
+		} else {
+			os.Remove(filepath.Join(c.settings.CacheDir, l1, l2))
+		}
 		if foundRanges%100 == 0 {
 			Info("cache handler: found ranges so far", "count", foundRanges)
 		}
@@ -616,7 +641,7 @@ func (c *CacheHandler) updateStats() {
 func (c *CacheHandler) updateStatsLocked() {
 	if c.stats != nil {
 		c.stats.SetCacheCount(int(c.cacheCount))
-		c.stats.SetCacheSize(c.cacheSize)
+		c.stats.SetCacheSize(c.cacheSizeWithOverheadLocked())
 	}
 }
 

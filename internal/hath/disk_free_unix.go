@@ -4,12 +4,12 @@ package hath
 
 import "golang.org/x/sys/unix"
 
-// diskFree returns free bytes available to unprivileged users. Uses Bavail
-// rather than Bfree to match the original getFreeSpace() intent.
+// diskFree matches java.io.File.getFreeSpace(), which reports unallocated
+// bytes rather than only the portion available to an unprivileged caller.
 func diskFree(path string) int64 {
 	var s unix.Statfs_t
 	if err := unix.Statfs(path, &s); err != nil {
-		return 1<<63 - 1 // unknown → treat as effectively unlimited
+		return 0 // unknown: fail closed like File.getFreeSpace()
 	}
-	return int64(s.Bavail) * int64(s.Bsize)
+	return int64(s.Bfree) * int64(s.Bsize)
 }

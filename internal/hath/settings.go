@@ -69,37 +69,48 @@ type Settings struct {
 	serverTimeDelta int64
 
 	// rpc-server failover (guarded by mu)
-	mu                 sync.Mutex
-	rpcServers         []net.IP
-	rpcServerCurrent   string
-	rpcServerLastFail  string
+	mu                sync.Mutex
+	rpcServers        []net.IP
+	rpcServerCurrent  string
+	rpcServerLastFail string
 }
 
 // NewSettings returns settings with the original client defaults.
 func NewSettings() *Settings {
 	return &Settings{
-		MaxAllowedFile:   1073741824,
-		FSBlockSize:      4096,
-		MaxFilenameLen:   125,
-		RPCServerPort:    80,
-		RPCPath:          defaultRPCPath,
-		DataDir:          "data",
-		LogDir:           "log",
-		CacheDir:         "cache",
-		TempDir:          "tmp",
-		DownloadDir:      "download",
-		ImageProxyType:   "socks",
+		MaxAllowedFile: 1073741824,
+		FSBlockSize:    4096,
+		MaxFilenameLen: 125,
+		RPCServerPort:  80,
+		RPCPath:        defaultRPCPath,
+		DataDir:        "data",
+		LogDir:         "log",
+		CacheDir:       "cache",
+		TempDir:        "tmp",
+		DownloadDir:    "download",
+		ImageProxyType: "socks",
 	}
 }
 
 // ServerTime returns the server-corrected unix seconds.
 func (s *Settings) ServerTime() int64 {
-	return time.Now().Unix() + s.serverTimeDelta
+	s.mu.Lock()
+	delta := s.serverTimeDelta
+	s.mu.Unlock()
+	return time.Now().Unix() + delta
 }
 
 // SetServerTime records the delta implied by a server-reported timestamp.
 func (s *Settings) SetServerTime(serverTime int64) {
+	s.mu.Lock()
 	s.serverTimeDelta = serverTime - time.Now().Unix()
+	s.mu.Unlock()
+}
+
+func (s *Settings) ServerTimeDelta() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.serverTimeDelta
 }
 
 // MaxConnections replicates the original formula.
@@ -108,6 +119,12 @@ func (s *Settings) MaxConnections() int {
 		return s.OverrideConns
 	}
 	return 20 + min(480, int(s.ThrottleBytes/10000))
+}
+
+func (s *Settings) DiskLimitBytes() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.DiskLimit
 }
 
 // LoginValid checks clientID>0 and key is exactly 20 alphanumerics.
@@ -154,7 +171,7 @@ func (s *Settings) SaveLogin() error {
 // InitDirs creates all working directories.
 func (s *Settings) InitDirs() error {
 	for _, d := range []string{s.DataDir, s.LogDir, s.CacheDir, s.TempDir, s.DownloadDir} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		if err := os.MkdirAll(d, 0o777); err != nil {
 			return err
 		}
 	}
@@ -199,18 +216,22 @@ func atoi(v string) int     { n, _ := strconv.Atoi(v); return n }
 func (s *Settings) applySetting(name, value string) {
 	switch name {
 	case "min_client_build":
-		if atoi(value) > ClientBuild {
+		if n, err := strconv.Atoi(value); err == nil && n > ClientBuild {
 			dieErr(fmt.Sprintf("client too old (need build %s); update from http://hentaiathome.net/", value))
 		}
 	case "cur_client_build":
-		if atoi(value) > ClientBuild {
+		if n, err := strconv.Atoi(value); err == nil && n > ClientBuild {
 			s.WarnNewClient = true
 		}
 	case "server_time":
-		s.SetServerTime(atoi64(value))
-		Debug("setting altered", "server_time_delta", s.serverTimeDelta)
+		if n, err := strconv.ParseInt(value, 10, 64); err == nil {
+			s.SetServerTime(n)
+			Debug("setting altered", "server_time_delta", s.ServerTimeDelta())
+		}
 	case "rpc_server_port":
-		s.RPCServerPort = atoi(value)
+		if n, err := strconv.ParseInt(value, 10, 16); err == nil {
+			s.RPCServerPort = int(n)
+		}
 	case "rpc_server_ip":
 		s.setRPCServers(value)
 	case "rpc_path":
@@ -219,21 +240,29 @@ func (s *Settings) applySetting(name, value string) {
 		s.ClientHost = value
 	case "port":
 		if s.ClientPort == 0 {
-			s.ClientPort = atoi(value)
+			if n, err := strconv.Atoi(value); err == nil {
+				s.ClientPort = n
+			}
 		}
 	case "throttle_bytes":
-		s.ThrottleBytes = atoi64(value)
+		if n, err := strconv.ParseInt(value, 10, 64); err == nil {
+			s.ThrottleBytes = n
+		}
 	case "disklimit_bytes":
 		// increases only; reductions apply on restart (matches original)
-		if n := atoi64(value); n >= s.DiskLimit {
+		if n, err := strconv.ParseInt(value, 10, 64); err == nil && n >= s.DiskLimit {
 			s.DiskLimit = n
-		} else {
+		} else if err == nil {
 			Warn("disk limit reduced; takes effect after restart")
 		}
 	case "diskremaining_bytes":
-		s.DiskMinRemaining = atoi64(value)
+		if n, err := strconv.ParseInt(value, 10, 64); err == nil {
+			s.DiskMinRemaining = n
+		}
 	case "filesystem_blocksize":
-		if bs := atoi64(value); bs > 0 && bs <= 65536 {
+		if bs, err := strconv.ParseInt(value, 10, 64); err != nil {
+			return
+		} else if bs > 0 && bs <= 65536 {
 			s.FSBlockSize = bs
 		} else {
 			s.FSBlockSize = 4096
@@ -261,20 +290,32 @@ func (s *Settings) applySetting(name, value string) {
 	case "skip_free_space_check":
 		s.SkipFreeSpaceCheck = value == "true"
 	case "max_connections":
-		s.OverrideConns = atoi(value)
+		if n, err := strconv.Atoi(value); err == nil {
+			s.OverrideConns = n
+		}
 	case "max_allowed_filesize":
-		s.MaxAllowedFile = atoi64(value)
+		if n, err := strconv.ParseInt(value, 10, 64); err == nil {
+			s.MaxAllowedFile = n
+		}
 	case "max_filename_length":
-		s.MaxFilenameLen = atoi(value)
+		if n, err := strconv.Atoi(value); err == nil {
+			s.MaxFilenameLen = n
+		}
 	case "static_ranges":
-		s.StaticRanges = make(map[string]bool)
+		ranges := make(map[string]bool)
 		for _, r := range strings.Split(value, ";") {
 			if len(r) == 4 {
-				s.StaticRanges[r] = true
+				ranges[r] = true
 			}
 		}
+		s.mu.Lock()
+		s.StaticRanges = ranges
+		s.StaticRangeCount = len(ranges)
+		s.mu.Unlock()
 	case "static_range_count":
-		s.StaticRangeCount = atoi(value)
+		if n, err := strconv.Atoi(value); err == nil {
+			s.StaticRangeCount = n
+		}
 	case "cache_dir":
 		s.CacheDir = value
 	case "temp_dir":
@@ -290,7 +331,9 @@ func (s *Settings) applySetting(name, value string) {
 	case "image_proxy_host":
 		s.ImageProxyHost = strings.ToLower(value)
 	case "image_proxy_port":
-		s.ImageProxyPort = atoi(value)
+		if n, err := strconv.Atoi(value); err == nil {
+			s.ImageProxyPort = n
+		}
 	case "flush_logs":
 		s.FlushLogs = value == "true"
 	case "silentstart":
@@ -302,6 +345,8 @@ func (s *Settings) applySetting(name, value string) {
 
 // IsStaticRange reports whether the file id's range is assigned to this client.
 func (s *Settings) IsStaticRange(fileid string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.StaticRanges == nil || len(fileid) < 4 {
 		return false
 	}
@@ -311,20 +356,23 @@ func (s *Settings) IsStaticRange(fileid string) bool {
 // --- RPC server failover ---
 
 func (s *Settings) setRPCServers(value string) {
+	var servers []net.IP
+	for _, host := range strings.Split(value, ";") {
+		ips, err := net.LookupIP(strings.TrimSpace(host))
+		if err != nil || len(ips) == 0 {
+			return // Java preserves the previous list when any name fails
+		}
+		servers = append(servers, ips[0])
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.rpcServers = s.rpcServers[:0]
 	keepCurrent := false
-	for _, ip := range strings.Split(value, ";") {
-		parsed := net.ParseIP(strings.TrimSpace(ip))
-		if parsed == nil {
-			continue
-		}
-		s.rpcServers = append(s.rpcServers, parsed)
-		if s.rpcServerCurrent != "" && parsed.String() == s.rpcServerCurrent {
+	for _, ip := range servers {
+		if s.rpcServerCurrent != "" && ip.String() == s.rpcServerCurrent {
 			keepCurrent = true
 		}
 	}
+	s.rpcServers = servers
 	if !keepCurrent {
 		s.rpcServerCurrent = ""
 	}
@@ -354,7 +402,7 @@ func (s *Settings) RPCServerHost() string {
 		return withPort(s.rpcServerCurrent, s.RPCServerPort)
 	}
 	if len(s.rpcServers) == 0 {
-		return withPort(ClientRPCHost, s.RPCServerPort)
+		return ClientRPCHost
 	}
 	if len(s.rpcServers) == 1 {
 		s.rpcServerCurrent = s.rpcServers[0].String()

@@ -298,7 +298,7 @@ func TestGalleryLoopDownloads(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	c.shutdown = true
+	c.requestShutdown()
 	if !done {
 		t.Fatal("gallery file was not downloaded")
 	}
@@ -323,7 +323,7 @@ func TestGalleryLoopDownloadFails(t *testing.T) {
 	c.rpc = rpc
 	NewGalleryDownloader(c)
 	// let the retry loop exhaust, then stop
-	time.AfterFunc(800*time.Millisecond, func() { c.shutdown = true })
+	time.AfterFunc(800*time.Millisecond, c.requestShutdown)
 	for i := 0; i < 100; i++ {
 		if c.gallery == nil {
 			break
@@ -361,7 +361,7 @@ func TestGalleryLoopSuspendedAndLowSpace(t *testing.T) {
 		// now low-space so the loop hits the 5min-sleep branch (no-op here)
 		s.DiskMinRemaining = 1 << 50
 	})
-	time.AfterFunc(900*time.Millisecond, func() { c.shutdown = true })
+	time.AfterFunc(900*time.Millisecond, c.requestShutdown)
 	for i := 0; i < 100; i++ {
 		if c.gallery == nil {
 			break

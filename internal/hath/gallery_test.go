@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -42,6 +43,13 @@ func TestGalleryParseMeta(t *testing.T) {
 	}
 	if !strings.Contains(g.info, "some info line") {
 		t.Fatalf("information not captured: %q", g.info)
+	}
+	newline := "\n"
+	if runtime.GOOS == "windows" {
+		newline = "\r\n"
+	}
+	if want := "some info line" + newline; g.info != want {
+		t.Fatalf("galleryinfo bytes = %q, want Java bytes %q", g.info, want)
 	}
 }
 
@@ -136,7 +144,7 @@ func TestValidateFileSHA1(t *testing.T) {
 func TestDebugXresRe(t *testing.T) {
 	fmt.Printf("xresRe: %v\n", xresRe)
 	fmt.Printf("xresRe.MatchString('org'): %v\n", xresRe.MatchString("org"))
-	
+
 	// Test the actual parsing logic
 	line := "MINXRES org"
 	k, v, ok := strings.Cut(line, " ")
@@ -156,11 +164,11 @@ func TestDebugParseMetaDirect(t *testing.T) {
 	s.DownloadDir = dir
 	g := &GalleryDownloader{settings: s, rpc: &ServerHandler{settings: s}}
 	meta := "GID 4242\nFILECOUNT 2\nMINXRES org\nTITLE Test Gallery\nFILELIST\n1 0 org aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa jpg page1\n2 1 org unknown png page two\nINFORMATION\nsome info line\n"
-	
+
 	// Debug: call parseMeta step by step
 	fmt.Printf("Before parseMeta: gid=%d, filecount=%d, minxres=%q, title=%q\n", g.gid, g.filecount, g.minxres, g.title)
 	result := g.parseMeta(meta)
-	fmt.Printf("After parseMeta: result=%v, gid=%d, filecount=%d, minxres=%q, title=%q, todir=%q, files=%d\n", 
+	fmt.Printf("After parseMeta: result=%v, gid=%d, filecount=%d, minxres=%q, title=%q, todir=%q, files=%d\n",
 		result, g.gid, g.filecount, g.minxres, g.title, g.todir, len(g.files))
 	if !result {
 		t.Fatal("parseMeta should succeed")

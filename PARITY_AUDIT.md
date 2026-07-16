@@ -1,6 +1,8 @@
 # Java → Go behavioral parity audit
 
-Status: **production migration blocked** pending closure of the critical items below.
+Status: **production migration blocked** pending the canary
+gates listed below. The implementation findings have been addressed locally;
+production evidence is deliberately not inferred from unit tests.
 
 Reference: `hath_java/src/hath/base/` (Hentai@Home 1.6.5, build 178).
 
@@ -28,89 +30,76 @@ HTTP implementation details, or failure recovery.
 
 | Area | Classification | Finding |
 |---|---|---|
-| PKCS#12 | Bug, fixed in `1326bca` | The old Go decoder required exactly a private key and one certificate. Real server PFX contained additional certificate safe bags. `DecodeChain` now accepts them, but real keytool/server fixtures, alias selection, key association, and chain-order validation remain unverified. |
-| TLS startup | Bug | Go starts the listener asynchronously, waits 200 ms, and reports startup success even if bind/serve fails. Java binds synchronously before `notifyStart`. |
-| TLS refresh | Bug | Go shuts down the working listener before validating the replacement certificate, and clears the retry flag even after failure. It can remain registered without serving TLS. |
-| Listener death | Bug | Unexpected Go HTTP server termination is only logged. Java terminates the client instead of continuing heartbeats as a dead node. |
-| RPC HTTP status | Bug | Go text RPC parsing accepts bodies from non-2xx HTTP responses. Java treats HTTP errors as download failures and retries. |
-| Settings parsing | Bug | Go converts malformed numeric server settings to zero. Java preserves the old value after parse failure. This can corrupt server time, ports, throttles, and limits. |
-| Gallery pause | Bug | Go checks suspension/low disk after downloading a file. Java checks before the download. |
-| Disk query failure | Bug | Go treats a failed free-space query as unlimited space. Java generally yields zero and pauses/stops conservatively. |
-| Bandwidth | Bug | Accepted Go connections never set `trackedConn.throttle`; configured outbound throttling is bypassed. |
-| Statistics | Bug | Go HTTP writes do not call `Stats.BytesSent`; byte history and totals are wrong. |
-| Concurrency | Bug | `go test -race` reports races in client/gallery state, pruner state, certificate refresh/server replacement, and gallery loops. Settings map replacement also races with readers. |
-| Cache persistence | Bug | Go writes a startup snapshot before validation and does not update it after imports/deletes. A crash can leave stale state that is trusted on restart. |
+| PKCS#12 | Fixed and verified | An original server bundle decoded successfully as one RSA key and three certificates. The `hath.network` alias and local-key-ID match on the key and leaf, the public keys match, and both available issuer signatures verify. The final supplied certificate is intentionally not self-signed because its trust anchor is omitted. The server envelope is SHA-1 MAC/2048, three RC2-40 certificate bags/2048, and one 3DES shrouded keybag/2048. A format-matched fixture and end-to-end three-certificate TLS handshake pass. |
+| TLS startup | Fixed | Listener binding is synchronous and proven before `client_start`; bind-failure coverage passes. |
+| TLS refresh | Fixed | Replacement PFX is downloaded separately, parsed, associated, ordered, and expiry-checked before atomic promotion. The working listener uses dynamic certificate selection and is never stopped. Failures preserve the PFX/listener, undo suspension, and retain the retry flag. |
+| Listener death | Fixed | Unexpected `Serve` termination is sent to `Run`, which terminates the client rather than continuing heartbeats. |
+| RPC HTTP status | Fixed | Text RPC requires 2xx and retries three times. Status/retry/short-read/CRLF/ASCII coverage passes. |
+| Settings parsing | Fixed | Numeric parse failures preserve the previous value; server time, ports, limits, and counts have regression coverage. |
+| Gallery pause | Fixed | Suspension and low-space checks run before every file download. |
+| Disk query failure | Fixed | Filesystem query errors return zero and all space checks fail closed. |
+| Bandwidth | Fixed | Accepted non-local connections enable the shared outbound limiter. |
+| Statistics | Fixed | Plaintext socket writes, including HTTP headers and bodies, update `Stats.BytesSent`. |
+| Concurrency | Fixed under race gate | Client/gallery state, pruner shutdown/frequency, certificate rotation, imports/verification, and settings range maps are synchronized. `go test -race ./internal/hath` passes with the loopback-only test guard. |
+| Cache persistence | Fixed | Startup always scans the authoritative filesystem instead of trusting a crash-stale snapshot; crash/restart import and deletion coverage passes. |
 
 ## High-impact divergences
 
 ### RPC and settings
 
-- Java retries text RPC downloads three times; Go currently performs one
-  60-second whole-request attempt.
-- `KEY_EXPIRED` retry for `server_stat` uses an authenticated Go URL instead of
-  Java's special unauthenticated stat URL.
-- Java decodes RPC text as US-ASCII; Go preserves arbitrary UTF-8 bytes.
-- Java rejects CRLF status lines; Go normalizes CRLF. This is a benign
-  robustness difference, not exact parity.
-- Java validates returned static/gallery source strings as URLs; Go returns
-  malformed strings to callers.
-- Go gallery/origin downloads have fewer retries than Java.
-- Go accepts hostnames differently in the RPC server list and applies the
-  custom RPC port differently to the default host.
-- Go does not derive `StaticRangeCount` from `static_ranges` unless a separate
-  count setting is sent.
+- Text RPC and origin downloads retry three times.
+- `server_stat`, including clock recovery, always uses the special
+  unauthenticated URL.
+- RPC text is decoded as US-ASCII; gallery metadata retains Java's UTF-8 path.
+- CRLF status lines are rejected exactly like Java; only LF is accepted.
+- Static/gallery source strings are accepted only as absolute HTTP(S) URLs.
+- RPC server names use resolver semantics, a failed list update preserves the
+  old list, and the default host ignores the custom port like Java.
+- `StaticRangeCount` is derived while parsing `static_ranges` and may later be
+  replaced by an explicit `static_range_count` update.
 
 ### Certificate and TLS
 
-- Java selects the `hath.network` KeyStore alias and lets KeyManagerFactory
-  associate keys/certificates. Go currently assumes the first certificate bag
-  is the leaf and one private key exists.
-- Go transmits every extra certificate bag in input order without proving an
-  issuer chain. A Java/keytool/server PFX fixture and TLS handshake assertion
-  are required.
-- A downloaded malformed/expired PFX replaces the persisted known-good file
-  before validation. There is no rollback to the previous certificate.
-- Certificate retries can reuse an authenticated URL long enough for its key to
-  expire.
-- TLS handshake errors are ignored during listener admission.
+- A keytool fixture verifies the `hath.network` alias/local-key-ID layout.
+  Selection is by private/public-key association rather than bag position.
+- Only the associated, signature-verified issuer chain is transmitted, in
+  leaf-to-root order; unrelated bags are ignored.
+- Malformed/expired downloads never replace the persisted known-good PFX.
+- Every certificate retry rebuilds its authenticated URL and timestamp.
+- TLS handshake errors are rejected before admission and counting.
 - TLS 1.2/1.3 policy matches, but JSSE and Go cipher/session defaults differ.
 
 ### HTTP server
 
-- Go connection limits are counted on first read, not accept; bursts can exceed
-  the configured maximum.
-- Java serves one request and closes the connection. Go permits keep-alive and
-  has no idle timeout.
+- Connection limits are counted at accept/admission time.
+- Responses force `Connection: close`; one request is served per connection.
 - Java's request/header bounds and error bodies differ from `net/http`.
-- `http.ServeContent` adds range and conditional-request behavior Java does not
-  provide, and Go statistics/logging currently do not reflect the final status.
-- Java command dispatch and keystamp hex comparison are case-insensitive; Go is
-  case-sensitive.
-- Go's `xres` regex is substring-based and accepts values Java rejects.
-- Go immediately closes active handlers on shutdown; Java waits for sessions to
-  drain.
-- Go can send `client_stop` even when startup never completed; Java only reports
-  shutdown after successful startup notification.
+- Cached/proxied files ignore range and conditional headers like Java and send
+  explicit full-response lengths.
+- Command dispatch, server-command hashes, and keystamps are case-insensitive.
+- `xres` is whole-string validated.
+- Shutdown waits up to Java's 25-second drain window before forcing handlers
+  closed.
+- `client_stop` is sent only after successful `client_start`.
 
 ### Cache, gallery, and filesystem
 
-- Gallery metadata parsing in Go accepts missing, duplicate, nonnumeric, or
-  out-of-range pages that Java rejects.
-- Go does not report a gallery SHA-1 mismatch through the same downloader
-  failure path as Java.
-- Go can retain a phantom static-range age entry after startup removes every
-  invalid file in the range.
-- Go persistent state validates structure less strictly than Java's hashed
-  metadata files.
-- Concurrent same-ID imports can double-count cache entries; import/prune and
-  background verification can race with replacement.
-- Go accepts file sizes above Java's signed 32-bit limit.
-- Cache stats omit Java's estimated filesystem-block overhead.
-- Go directory/file modes are not always equivalent to Java plus process umask;
-  hard-coded `0755` prevents group-write even under `UMASK=0002`.
+- Gallery metadata rejects missing/duplicate/nonnumeric/out-of-range/duplicate
+  pages and requires exactly `FILECOUNT` entries.
+- Gallery SHA-1 mismatches use the same failure-report path as download errors.
+- Empty/invalid ranges do not retain phantom age entries.
+- Persistent snapshots are not trusted; the filesystem is revalidated on every
+  startup, including existing Java cache layouts.
+- Same-ID imports are idempotent and import/prune/background verification share
+  the cache lock.
+- File sizes above Java's signed 32-bit limit are rejected.
+- Cache stats include the estimated half-block-per-file overhead.
+- Directories/files use `0777`/`0666` creation masks so process umask determines
+  the effective Java-compatible mode.
 - Java and Go differ for directory-path collisions, Unicode/UTF-16 title length,
-  Windows reserved names, and exact `galleryinfo.txt` bytes.
-- Unix free-space values differ (`Bavail` versus Java `getFreeSpace`).
+  and Windows reserved names. `galleryinfo.txt` preserves Java's UTF-8 content
+  and platform line separator byte-for-byte, including its single final newline.
+- Unix free-space uses `Bfree`, matching Java `File.getFreeSpace` semantics.
 
 ## Intentional or accepted differences
 
@@ -128,23 +117,32 @@ These must remain documented rather than described as exact parity:
 
 A production migration must not be recommended until all of these pass:
 
-1. `go test ./...`
-2. `go test -race ./internal/hath`
-3. Java/server-issued PFX fixture test:
+1. `go test ./...` — **passes with loopback-only network guard**
+2. `go test -race ./internal/hath` — **passes with loopback-only network guard**
+3. Java/server-issued PFX fixture test — **passes; an original server bundle
+   decoded successfully and the exact server-envelope fixture passes**:
    - alias `hath.network`
    - local-key-ID association
    - leaf/intermediate/root or actual server bag layout
    - end-to-end TLS handshake proving served leaf and chain
-4. Listener bind-failure and unexpected-listener-death tests.
+4. Listener bind-failure and unexpected-listener-death tests — **pass**.
 5. Certificate refresh failure test proving no dead registered node and no
-   replacement of a known-good certificate.
+   replacement of a known-good certificate — **passes**.
 6. Captured RPC replay including HTTP status, malformed/timeout response, and
-   retry behavior—not only query/auth parity.
+   retry behavior—not only query/auth parity — **passes**. A sanitized replay
+   pins the successful Java startup order and exact common wire headers from
+   the 456-record packet-proxy capture. Synthetic tests cover status,
+   malformed/short, timeout, and retry paths because the supplied capture
+   contains only HTTP 200 exchanges.
 7. Existing Java cache/data fixture startup, mutation, forced crash, and restart
-   test.
-8. Low-space/unavailable-mount test proving fail-closed behavior.
+   test — **passes against 20 files from a copied 7.3GB Java cache**. Every
+   sampled path, declared size, and SHA-1 matched; actual Go `CacheHandler`
+   startup/restart counts were 20, 19 after deletion with a stale snapshot,
+   and 20 after restoration. The source fixture remained read-only.
+8. Low-space/unavailable-mount test proving fail-closed behavior — **passes**.
 9. Canary startup with container restart disabled; only enable restart after a
-   complete `notifyStart` and externally verified TLS response.
+   complete `notifyStart` and externally verified TLS response — **not run; real
+   credentials and production RPC access are intentionally prohibited here**.
 
 ## Migration safety policy
 

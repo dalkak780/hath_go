@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,22 +19,22 @@ import (
 
 // GalleryDownloader polls and executes gallery download jobs.
 type GalleryDownloader struct {
-	client       *HathClient
-	rpc          *ServerHandler
-	settings     *Settings
-	stats        *Stats
-	limiter      *BandwidthMonitor
+	client   *HathClient
+	rpc      *ServerHandler
+	settings *Settings
+	stats    *Stats
+	limiter  *BandwidthMonitor
 
-	gid      int
+	gid       int
 	filecount int
-	minxres  string
-	title    string
-	info     string
-	files    []*galleryFile
-	todir    string
+	minxres   string
+	title     string
+	info      string
+	files     []*galleryFile
+	todir     string
 
-	pending bool
-	marked  bool
+	pending  bool
+	marked   bool
 	failures []string
 }
 
@@ -45,15 +47,19 @@ var (
 // backoff sleeps without slowing the suite. Mirrors certRefreshSleep.
 var gallerySleep = func(d time.Duration) { time.Sleep(d) }
 
-// NewGalleryDownloader starts the downloader goroutine.
 func NewGalleryDownloader(c *HathClient) *GalleryDownloader {
+	g := newGalleryDownloader(c)
+	go g.loop()
+	return g
+}
+
+func newGalleryDownloader(c *HathClient) *GalleryDownloader {
 	g := &GalleryDownloader{
 		client: c, rpc: c.rpc, settings: c.settings, stats: c.stats,
 	}
 	if !c.settings.DisableDownloadBWM {
 		g.limiter = NewBandwidthMonitor(c.settings.ThrottleBytes)
 	}
-	go g.loop()
 	return g
 }
 
@@ -76,45 +82,51 @@ func (g *GalleryDownloader) loop() {
 			Info("gallery downloader: starting gallery", "title", g.title)
 
 			galleryretry := 0
-		totalFailed := 0
-		success := false
-		for !success && galleryretry < 10 && totalFailed < g.filecount*2 {
-			galleryretry++
-			successful := 0
-			for _, gf := range g.files {
-				if g.client.IsShuttingDown() {
-					break
-				}
-				var sleep time.Duration
-				switch gf.download(g) {
-				case dlOK, dlAlready:
-					successful++
-					if gf.state == dlOK {
-						sleep = time.Second
+			totalFailed := 0
+			success := false
+			for !success && galleryretry < 10 && totalFailed < g.filecount*2 {
+				galleryretry++
+				successful := 0
+				for _, gf := range g.files {
+					if g.client.IsShuttingDown() {
+						break
 					}
-				case dlFailed:
-					totalFailed++
-					sleep = 5 * time.Second
+					for g.client.IsSuspended() || g.downloadDirLowSpace() {
+						if g.client.IsShuttingDown() {
+							break
+						}
+						if g.downloadDirLowSpace() {
+							Warn("gallery downloader: paused, low disk space")
+						}
+						gallerySleep(60 * time.Second)
+					}
+					if g.client.IsShuttingDown() {
+						break
+					}
+					var sleep time.Duration
+					switch gf.download(g) {
+					case dlOK, dlAlready:
+						successful++
+						if gf.state == dlOK {
+							sleep = time.Second
+						}
+					case dlFailed:
+						totalFailed++
+						sleep = 5 * time.Second
+					}
+					if sleep > 0 {
+						gallerySleep(sleep)
+					}
 				}
-				if g.client.IsSuspended() {
-					sleep = 60 * time.Second
-				} else if g.downloadDirLowSpace() {
-					Warn("gallery downloader: paused, low disk space")
-					sleep = 5 * time.Minute
-				}
-				if sleep > 0 {
-					gallerySleep(sleep)
+				if successful == g.filecount {
+					success = true
 				}
 			}
-			if successful == g.filecount {
-				success = true
-			}
-		}
 			g.finalize(success)
 		}()
 	}
 	Info("gallery downloader: thread finished")
-	g.client.gallery = nil
+	g.client.galleryDone(g)
 }
 
 func (g *GalleryDownloader) downloadDirLowSpace() bool {
@@ -133,7 +145,7 @@ func (g *GalleryDownloader) fetchMeta() bool {
 	if g.marked {
 		add = strconv.Itoa(g.gid) + ";" + g.minxres
 	}
-	meta := strings.TrimSpace(g.rpc.FetchQueue(add))
+	meta := g.rpc.FetchQueue(add)
 	if meta == "" || meta == "INVALID_REQUEST" || meta == "NO_PENDING_DOWNLOADS" {
 		return false
 	}
@@ -154,7 +166,15 @@ func (g *GalleryDownloader) fetchMeta() bool {
 func (g *GalleryDownloader) parseMeta(meta string) bool {
 	g.reset()
 	state := 0
-	for _, line := range strings.Split(meta, "\n") {
+	seen := make(map[string]bool)
+	pages := make(map[int]bool)
+	lines := strings.Split(meta, "\n")
+	// Java String.split("\n") discards trailing empty fields. Preserve all
+	// other whitespace, especially INFORMATION bytes.
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	for _, line := range lines {
 		if line == "FILELIST" && state == 0 {
 			state = 1
 			continue
@@ -172,33 +192,57 @@ func (g *GalleryDownloader) parseMeta(meta string) bool {
 			if !ok {
 				continue
 			}
+			if seen[k] {
+				return false
+			}
 			switch k {
 			case "GID":
-				g.gid, _ = strconv.Atoi(v)
+				n, err := strconv.Atoi(v)
+				if err != nil || n < 1 {
+					return false
+				}
+				g.gid = n
+				seen[k] = true
 			case "FILECOUNT":
-				g.filecount, _ = strconv.Atoi(v)
+				n, err := strconv.Atoi(v)
+				if err != nil || n < 1 {
+					return false
+				}
+				g.filecount = n
+				seen[k] = true
 			case "MINXRES":
 				if xresRe.MatchString(v) {
 					g.minxres = v
+					seen[k] = true
 				} else {
 					return false
 				}
 			case "TITLE":
+				if !seen["GID"] || !seen["MINXRES"] {
+					return false
+				}
 				g.setTitle(v)
+				seen[k] = true
+			default:
+				// Java ignores unrecognized metadata headers.
 			}
 		case 1:
 			gf := parseGalleryFile(line)
-			if gf != nil {
-				g.files = append(g.files, gf)
+			if gf == nil || gf.page < 1 || gf.page > g.filecount || pages[gf.page] {
+				return false
 			}
+			pages[gf.page] = true
+			g.files = append(g.files, gf)
 		case 2:
-			if g.info != "" {
-				g.info += "\n"
+			newline := "\n"
+			if runtime.GOOS == "windows" {
+				newline = "\r\n"
 			}
-			g.info += line
+			g.info += line + newline
 		}
 	}
-	return g.gid > 0 && g.filecount > 0 && g.minxres != "" && g.title != "" && g.todir != "" && len(g.files) > 0
+	sort.Slice(g.files, func(i, j int) bool { return g.files[i].page < g.files[j].page })
+	return state >= 1 && g.gid > 0 && g.filecount > 0 && g.minxres != "" && g.title != "" && g.todir != "" && len(g.files) == g.filecount
 }
 
 func (g *GalleryDownloader) setTitle(raw string) {
@@ -250,10 +294,10 @@ func (g *GalleryDownloader) setTitle(raw string) {
 		Warn("gallery downloader: unexpected download location")
 		dir = filepath.Join(g.settings.DownloadDir, strconv.Itoa(g.gid)+xresTitle)
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o777); err != nil {
 		Warn("gallery downloader: could not create dir; using fallback")
 		dir = filepath.Join(g.settings.DownloadDir, strconv.Itoa(g.gid)+xresTitle)
-		os.MkdirAll(dir, 0o755)
+		os.MkdirAll(dir, 0o777)
 	}
 	g.todir = dir
 	g.title = t
@@ -275,7 +319,7 @@ func (g *GalleryDownloader) finalize(success bool) {
 	g.marked = true
 	if success {
 		Info("gallery downloader: finished gallery", "title", g.title)
-		if err := os.WriteFile(filepath.Join(g.todir, "galleryinfo.txt"), []byte(g.info), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(g.todir, "galleryinfo.txt"), []byte(g.info), 0o666); err != nil {
 			Warn("gallery downloader: could not write galleryinfo.txt")
 		}
 	} else {
@@ -296,7 +340,7 @@ func (g *GalleryDownloader) logFailure(host, fileindex, xres string) {
 // --- gallery file ---
 
 const (
-	dlFailed  = iota
+	dlFailed = iota
 	dlOK
 	dlAlready
 )
@@ -316,8 +360,14 @@ func parseGalleryFile(line string) *galleryFile {
 	if len(parts) != 6 {
 		return nil
 	}
-	page, _ := strconv.Atoi(parts[0])
-	idx, _ := strconv.Atoi(parts[1])
+	page, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return nil
+	}
+	idx, err := strconv.Atoi(parts[1])
+	if err != nil || idx < 0 || !xresRe.MatchString(parts[2]) {
+		return nil
+	}
 	sha1 := parts[3]
 	if sha1 == "unknown" {
 		sha1 = ""
@@ -357,6 +407,7 @@ func (gf *galleryFile) download(g *GalleryDownloader) int {
 		Debug("gallery downloader: corrupt download; will retry", "file", gf.filename)
 		os.Remove(dest)
 		gf.state = dlFailed
+		g.logFailure(hostOf(source), strconv.Itoa(gf.fileindex), gf.xres)
 		return gf.state
 	}
 	gf.state = dlOK

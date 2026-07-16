@@ -6,11 +6,14 @@ package hath
 // is the client key.
 
 import (
+	"bytes"
+	"crypto"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	pkcs12 "software.sslmate.com/src/go-pkcs12"
@@ -21,6 +24,7 @@ const certFile = "hathcert.p12"
 // CertManager owns the server-issued TLS identity.
 type CertManager struct {
 	settings *Settings
+	mu       sync.RWMutex
 	cert     tls.Certificate
 	leaf     *x509.Certificate
 	expiry   time.Time
@@ -30,11 +34,13 @@ type CertManager struct {
 // tls.Certificate. Returns an error if the cert is missing or expired.
 func (c *CertManager) LoadOrRefresh(rpc *ServerHandler) error {
 	path := filepath.Join(c.settings.DataDir, certFile)
+	tmp := path + ".new"
+	defer os.Remove(tmp)
 	Info("requesting certificate from server...")
-	if err := rpc.GetCertificate(path); err != nil {
+	if err := rpc.GetCertificate(tmp); err != nil {
 		return err
 	}
-	p12, err := os.ReadFile(path)
+	p12, err := os.ReadFile(tmp)
 	if err != nil {
 		return err
 	}
@@ -42,35 +48,83 @@ func (c *CertManager) LoadOrRefresh(rpc *ServerHandler) error {
 	if err != nil {
 		return err
 	}
-	chain := make([][]byte, 0, 1+len(caCerts))
-	chain = append(chain, leaf.Raw)
-	for _, ca := range caCerts {
-		chain = append(chain, ca.Raw)
+	all := append([]*x509.Certificate{leaf}, caCerts...)
+	signer, ok := priv.(crypto.Signer)
+	if !ok {
+		return errors.New("PKCS#12 private key cannot sign")
 	}
-	c.leaf = leaf
-	c.expiry = leaf.NotAfter
-	c.cert = tls.Certificate{
+	pub, _ := x509.MarshalPKIXPublicKey(signer.Public())
+	for _, candidate := range all {
+		candidatePub, _ := x509.MarshalPKIXPublicKey(candidate.PublicKey)
+		if bytes.Equal(pub, candidatePub) {
+			leaf = candidate
+			break
+		}
+	}
+	leafPub, _ := x509.MarshalPKIXPublicKey(leaf.PublicKey)
+	if !bytes.Equal(pub, leafPub) {
+		return errors.New("PKCS#12 has no certificate associated with its private key")
+	}
+
+	ordered := []*x509.Certificate{leaf}
+	used := map[*x509.Certificate]bool{leaf: true}
+	for current := leaf; !bytes.Equal(current.RawIssuer, current.RawSubject); {
+		var issuer *x509.Certificate
+		for _, candidate := range all {
+			if !used[candidate] && bytes.Equal(current.RawIssuer, candidate.RawSubject) && current.CheckSignatureFrom(candidate) == nil {
+				issuer = candidate
+				break
+			}
+		}
+		if issuer == nil {
+			break
+		}
+		ordered = append(ordered, issuer)
+		used[issuer] = true
+		current = issuer
+	}
+	chain := make([][]byte, 0, len(ordered))
+	for _, cert := range ordered {
+		chain = append(chain, cert.Raw)
+	}
+	cert := tls.Certificate{
 		Certificate: chain,
 		PrivateKey:  priv,
 		Leaf:        leaf,
 	}
-	Debug("loaded keystore", "subject", leaf.Subject.String())
-	if c.IsExpired() {
+	if leaf.NotAfter.Before(time.Now().Add(24 * time.Hour)) {
 		return errors.New("retrieved certificate is expired (check system clock)")
 	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.leaf, c.expiry, c.cert = leaf, leaf.NotAfter, cert
+	c.mu.Unlock()
+	Debug("loaded keystore", "subject", leaf.Subject.String())
 	return nil
 }
 
 // IsExpired is true if the cert expires within 24h (matches the original check).
 func (c *CertManager) IsExpired() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.expiry.Before(time.Now().Add(24 * time.Hour))
 }
 
 // TLSConfig builds the server TLS config (TLS 1.2 / 1.3 only).
 func (c *CertManager) TLSConfig() *tls.Config {
+	c.mu.RLock()
+	initial := c.cert
+	c.mu.RUnlock()
 	return &tls.Config{
-		Certificates: []tls.Certificate{c.cert},
-		MinVersion:   tls.VersionTLS12,
-		MaxVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{initial},
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			c.mu.RLock()
+			defer c.mu.RUnlock()
+			return &c.cert, nil
+		},
+		MinVersion: tls.VersionTLS12,
+		MaxVersion: tls.VersionTLS13,
 	}
 }

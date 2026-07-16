@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -33,6 +34,28 @@ func TestFetchShortRead(t *testing.T) {
 	if _, _, err := rpc.fetch(srv.URL+"/x", 2*time.Second); err == nil {
 		t.Fatal("expected short-read error")
 	}
+}
+
+func TestRPCTextRetriesHTTPStatusAndDecodesASCII(t *testing.T) {
+	_, s, rpc := newMockRPC(t)
+	s.MaxAllowedFile = 1 << 30
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 { http.Error(w, "retry", http.StatusServiceUnavailable); return }
+		w.Header().Set("Content-Length", "3")
+		w.Write([]byte{'O', 'K', 0xff})
+	}))
+	defer srv.Close()
+	_, body, err := rpc.fetch(srv.URL, time.Second)
+	if err != nil || body != "OK�" || attempts.Load() != 3 { t.Fatalf("attempts=%d body=%q err=%v", attempts.Load(), body, err) }
+}
+
+func TestRPCCRLFStatusRejected(t *testing.T) {
+	_, s, rpc := newMockRPC(t)
+	s.MaxAllowedFile = 1 << 30
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("OK\r\nvalue\n")) }))
+	defer srv.Close()
+	if sr := rpc.callURL(srv.URL, ""); sr.Status != RespFail { t.Fatalf("CRLF status accepted: %+v", sr) }
 }
 
 func TestCachePersistentCorruptReload(t *testing.T) {

@@ -105,7 +105,7 @@ func TestGalleryUnicodeDownload(t *testing.T) {
 		}
 		t.Fatalf("unicode gallery file not created at %s; download dir contains: %v", dest, names)
 	}
-	client.shutdown = true
+	client.requestShutdown()
 	time.Sleep(100 * time.Millisecond)
 }
 

@@ -54,7 +54,7 @@ ci: vet test gate
 dist:
 	rm -rf dist && mkdir dist
 	for arch in amd64 arm64; do \
-	  for tool in captureproxy rpcverify; do \
+	  for tool in captureproxy rpcverify pfxinspect; do \
 	    GOOS=linux GOARCH=$$arch CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o dist/$$tool-linux-$$arch ./tools/$$tool; \
 	  done; \
 	done; \

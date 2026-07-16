@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -26,6 +27,19 @@ const maxRPCMemory = 10 * 1024 * 1024
 
 // rpcUserAgent is the UA sent on every outbound request.
 const rpcUserAgent = "Hentai@Home " + ClientVer
+
+// rpcAccept is URLConnection's captured default Accept value in Java 8. Keep
+// it byte-for-byte: the production packet trace shows it on both RPC and
+// origin downloads.
+const rpcAccept = "text/html, image/gif, image/jpeg, *; q=.2, */*; q=.2"
+
+func setJavaRequestHeaders(req *http.Request) {
+	req.Header.Set("Accept", rpcAccept)
+	req.Header.Set("Connection", "close")
+	req.Header.Set("User-Agent", rpcUserAgent)
+}
+
+var outboundDialContext = (&net.Dialer{Timeout: 5 * time.Second}).DialContext
 
 // RespStatus mirrors ServerResponse.RESPONSE_STATUS_*.
 type RespStatus int
@@ -46,10 +60,11 @@ type ServerResponse struct {
 
 // ServerHandler talks to the H@H RPC server.
 type ServerHandler struct {
-	settings      *Settings
-	client        *http.Client
-	stats         *Stats
-	lastOverload  time.Time
+	mu             sync.Mutex
+	settings       *Settings
+	client         *http.Client
+	stats          *Stats
+	lastOverload   time.Time
 	loginValidated bool
 }
 
@@ -62,14 +77,18 @@ func NewServerHandler(s *Settings, stats *Stats) *ServerHandler {
 		client: &http.Client{
 			Transport: &http.Transport{
 				DisableKeepAlives: true,
-				DialContext:       (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+				DialContext:       outboundDialContext,
 			},
 		},
 	}
 }
 
 // LoginValidated reports whether client_login has succeeded this run.
-func (h *ServerHandler) LoginValidated() bool { return h.loginValidated }
+func (h *ServerHandler) LoginValidated() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.loginValidated
+}
 
 // --- URL construction (must match the server's parser byte-for-byte) ---
 
@@ -98,60 +117,86 @@ func (h *ServerHandler) queryURL(act, add string) string {
 // the single chokepoint for every outbound RPC, so size/length policy lives here.
 func (h *ServerHandler) fetch(rawurl string, timeout time.Duration) (host, body string, err error) {
 	host = hostOf(rawurl)
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		body, lastErr = h.fetchOnce(rawurl, timeout)
+		if lastErr == nil {
+			return host, body, nil
+		}
+		Warn("rpc text fetch failed; retrying", "attempt", attempt+1, "err", lastErr)
+	}
+	return host, "", lastErr
+}
 
+func (h *ServerHandler) fetchOnce(rawurl string, timeout time.Duration) (string, error) {
+	data, err := h.fetchOnceBytes(rawurl, timeout)
+	if err != nil {
+		return "", err
+	}
+	var text strings.Builder
+	for _, b := range data {
+		if b < 0x80 {
+			text.WriteByte(b)
+		} else {
+			text.WriteRune('\uFFFD')
+		}
+	}
+	return text.String(), nil
+}
+
+func (h *ServerHandler) fetchOnceBytes(rawurl string, timeout time.Duration) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawurl, nil)
 	if err != nil {
-		return host, "", err
+		return nil, err
 	}
-	req.Header.Set("Connection", "close")
-	req.Header.Set("User-Agent", rpcUserAgent)
-
+	setJavaRequestHeaders(req)
 	Debug("rpc GET", "url", rawurl)
 	resp, err := h.client.Do(req)
 	if err != nil {
-		return host, "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
-
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("rpc returned status %d", resp.StatusCode)
+	}
 	if resp.ContentLength < 0 {
-		// The server always sends Content-Length; a missing one means something
-		// is wrong (or a firewall/PeerBlock is interfering). Abort.
-		return host, "", errors.New("missing Content-Length")
+		return nil, errors.New("missing Content-Length")
 	}
 	if resp.ContentLength > maxRPCMemory {
-		return host, "", fmt.Errorf("rpc reply %d bytes exceeds memory cap %d", resp.ContentLength, maxRPCMemory)
+		return nil, fmt.Errorf("rpc reply %d bytes exceeds memory cap %d", resp.ContentLength, maxRPCMemory)
 	}
 	if resp.ContentLength > h.settings.MaxAllowedFile {
-		return host, "", fmt.Errorf("rpc reply %d exceeds max allowed filesize %d", resp.ContentLength, h.settings.MaxAllowedFile)
+		return nil, fmt.Errorf("rpc reply %d exceeds max allowed filesize %d", resp.ContentLength, h.settings.MaxAllowedFile)
 	}
-
 	data, err := io.ReadAll(io.LimitReader(resp.Body, resp.ContentLength+1))
 	if err != nil {
-		return host, "", err
+		return nil, err
 	}
 	if int64(len(data)) != resp.ContentLength {
-		return host, "", fmt.Errorf("short read: got %d want %d", len(data), resp.ContentLength)
+		return nil, fmt.Errorf("short read: got %d want %d", len(data), resp.ContentLength)
 	}
-	return host, string(data), nil
+	return data, nil
 }
 
 // fetchFile downloads rawurl to dest via a temp file (atomic rename), with up
 // to 3 retries. Used for get_cert (PKCS#12).
 func (h *ServerHandler) fetchFile(rawurl, dest string, timeout time.Duration) error {
+	return h.fetchFileURL(func() string { return rawurl }, dest, timeout)
+}
+
+func (h *ServerHandler) fetchFileURL(rawurl func() string, dest string, timeout time.Duration) error {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		err := func() error {
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawurl, nil)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawurl(), nil)
 			if err != nil {
 				return err
 			}
-			req.Header.Set("Connection", "close")
-			req.Header.Set("User-Agent", rpcUserAgent)
+			setJavaRequestHeaders(req)
 			resp, err := h.client.Do(req)
 			if err != nil {
 				return err
@@ -210,9 +255,6 @@ func (h *ServerHandler) callURL(rawurl, retryAct string) *ServerResponse {
 	Debug("received response", "body", body)
 
 	lines := strings.Split(body, "\n")
-	for i := range lines {
-		lines[i] = strings.TrimRight(lines[i], "\r")
-	}
 	// Java's String.split("\n") drops trailing empty strings; match that.
 	for len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
@@ -246,7 +288,7 @@ func (h *ServerHandler) noteNull(sr *ServerResponse) {
 
 // RefreshServerStat syncs the clock and min-build from the server.
 func (h *ServerHandler) RefreshServerStat() bool {
-	sr := h.callURL(h.statURL(), ActServerStat)
+	sr := h.callURL(h.statURL(), "")
 	h.noteNull(sr)
 	if sr.Status == RespOK {
 		h.settings.ApplySettings(sr.Lines)
@@ -267,7 +309,9 @@ func (h *ServerHandler) LoadClientSettingsFromServer() {
 		sr := h.callAuthed(ActClientLogin)
 		switch sr.Status {
 		case RespOK:
+			h.mu.Lock()
 			h.loginValidated = true
+			h.mu.Unlock()
 			Info("applying settings...")
 			h.settings.ApplySettings(sr.Lines)
 			Info("finished applying settings")
@@ -339,6 +383,8 @@ func (h *ServerHandler) simpleNotify(act, label string) bool {
 
 // NotifyOverload is throttled to once per 30s.
 func (h *ServerHandler) NotifyOverload() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	now := time.Now()
 	if h.lastOverload.Add(30 * time.Second).After(now) {
 		return false
@@ -391,7 +437,7 @@ func (h *ServerHandler) GetStaticRangeFetchURL(fileindex, xres, fileid string) [
 	if sr.Status == RespOK {
 		var urls []string
 		for _, l := range sr.Lines {
-			if l != "" {
+			if validHTTPURL(l) {
 				urls = append(urls, l)
 			}
 		}
@@ -406,11 +452,16 @@ func (h *ServerHandler) GetDownloaderFetchURL(gid, page, fileindex int, xres str
 	add := fmt.Sprintf("%d;%d;%d;%s;%d", gid, page, fileindex, xres, fileretry)
 	sr := h.callURL(h.queryURL(ActDownloaderFetch, add), "")
 	h.noteNull(sr)
-	if sr.Status == RespOK && len(sr.Lines) > 0 {
+	if sr.Status == RespOK && len(sr.Lines) > 0 && validHTTPURL(sr.Lines[0]) {
 		return sr.Lines[0]
 	}
 	Info("failed to request gallery file url", "fileindex", fileindex)
 	return ""
+}
+
+func validHTTPURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https")
 }
 
 // ReportDownloaderFailures reports up to 50 distinct download failures.
@@ -425,7 +476,7 @@ func (h *ServerHandler) ReportDownloaderFailures(failures []string) {
 
 // GetCertificate downloads the PKCS#12 cert to dest.
 func (h *ServerHandler) GetCertificate(dest string) error {
-	return h.fetchFile(h.queryURL(ActGetCertificate, ""), dest, 300*time.Second)
+	return h.fetchFileURL(func() string { return h.queryURL(ActGetCertificate, "") }, dest, 300*time.Second)
 }
 
 // FetchQueue hits the gallery download queue (/15/dl? act=fetchqueue). add is
@@ -436,17 +487,20 @@ func (h *ServerHandler) FetchQueue(add string) string {
 	rawurl := ClientRPCProtocol + h.settings.RPCServerHost() + "/15/dl?" +
 		fmt.Sprintf("clientbuild=%d&act=fetchqueue&add=%s&cid=%d&acttime=%d&actkey=%s",
 			ClientBuild, add, h.settings.ClientID, t, key)
-	_, body, err := h.fetch(rawurl, 30*time.Second)
-	if err != nil {
-		return ""
+	for attempt := 0; attempt < 3; attempt++ {
+		data, err := h.fetchOnceBytes(rawurl, 30*time.Second)
+		if err == nil {
+			return string(data)
+		}
+		Warn("gallery metadata fetch failed; retrying", "attempt", attempt+1, "err", err)
 	}
-	return body
+	return ""
 }
 
 // originClient builds an HTTP client for fetching from origin servers / other
 // H@H nodes, honoring the optional image proxy (HTTP or SOCKS).
 func (h *ServerHandler) originClient(allowProxy bool) *http.Client {
-	c := &http.Client{Timeout: 5 * time.Minute}
+	c := &http.Client{Timeout: 5 * time.Minute, Transport: &http.Transport{DialContext: outboundDialContext}}
 	if !allowProxy || h.settings.ImageProxyHost == "" {
 		return c
 	}
@@ -454,7 +508,7 @@ func (h *ServerHandler) originClient(allowProxy bool) *http.Client {
 	case "http", "https":
 		proxyURL, err := url.Parse(fmt.Sprintf("http://%s:%d", h.settings.ImageProxyHost, imageProxyPortOrDefault(h.settings)))
 		if err == nil {
-			c.Transport = &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+			c.Transport = &http.Transport{Proxy: http.ProxyURL(proxyURL), DialContext: outboundDialContext}
 		}
 	case "socks":
 		dialer, err := proxy.SOCKS5("tcp", fmt.Sprintf("%s:%d", h.settings.ImageProxyHost, imageProxyPortOrDefault(h.settings)), nil, proxy.Direct)
@@ -479,6 +533,19 @@ func imageProxyPortOrDefault(s *Settings) int {
 // caps and optional bandwidth limiting. Hath-Request is sent when isHath is
 // true (proxy fetches from other clients).
 func (h *ServerHandler) DownloadToFile(rawurl, dest string, timeout time.Duration, allowProxy, isHath bool, limiter *BandwidthMonitor, fileid string) (int64, error) {
+	var n int64
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		n, err = h.downloadToFileOnce(rawurl, dest, timeout, allowProxy, isHath, limiter, fileid)
+		if err == nil {
+			return n, nil
+		}
+		Warn("origin fetch failed; retrying", "attempt", attempt+1, "err", err)
+	}
+	return n, err
+}
+
+func (h *ServerHandler) downloadToFileOnce(rawurl, dest string, timeout time.Duration, allowProxy, isHath bool, limiter *BandwidthMonitor, fileid string) (int64, error) {
 	cl := h.originClient(allowProxy)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -486,8 +553,7 @@ func (h *ServerHandler) DownloadToFile(rawurl, dest string, timeout time.Duratio
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("Connection", "close")
-	req.Header.Set("User-Agent", rpcUserAgent)
+	setJavaRequestHeaders(req)
 	if isHath {
 		req.Header.Set("Hath-Request", fmt.Sprintf("%d-%s", h.settings.ClientID, sha1Hex(h.settings.ClientKey+fileid)))
 	}

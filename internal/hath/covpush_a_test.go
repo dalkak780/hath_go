@@ -54,7 +54,7 @@ func TestSetRPCServersClearsCurrentOnMiss(t *testing.T) {
 	s.mu.Lock()
 	s.rpcServerCurrent = "1.2.3.4"
 	s.mu.Unlock()
-	s.setRPCServers("5.6.7.8;notanip") // current not in new set → cleared; invalid skipped
+	s.setRPCServers("5.6.7.8") // current not in new set → cleared
 	s.mu.Lock()
 	cur := s.rpcServerCurrent
 	s.mu.Unlock()
@@ -142,8 +142,8 @@ func TestValidateFileSHA1AllPaths(t *testing.T) {
 }
 
 func TestDiskFreeErrorAndOk(t *testing.T) {
-	if got := diskFree(filepath.Join(t.TempDir(), "missing")); got != 1<<63-1 {
-		t.Fatalf("error path should return effectively-unlimited, got %d", got)
+	if got := diskFree(filepath.Join(t.TempDir(), "missing")); got != 0 {
+		t.Fatalf("error path should fail closed, got %d", got)
 	}
 	if got := diskFree(t.TempDir()); got <= 0 {
 		t.Fatalf("should report free bytes, got %d", got)

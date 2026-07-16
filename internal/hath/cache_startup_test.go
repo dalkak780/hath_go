@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -131,11 +132,52 @@ func TestCopyFile(t *testing.T) {
 	}
 }
 
+func TestCrashRestartUsesFilesystemNotStaleSnapshot(t *testing.T) {
+	ch, s := buildCache(t)
+	ch.pruner.stop()
+	f := ParseHVFile("abcdef0123456789abcdef0123456789abcdef01-5-jpg")
+	ch.savePersistent() // stale snapshot says empty
+	os.MkdirAll(filepath.Dir(ch.LocalPath(f)), 0o777)
+	os.WriteFile(ch.LocalPath(f), []byte("hello"), 0o666)
+	s.StaticRanges = map[string]bool{f.StaticRange(): true}
+	s.StaticRangeCount = 1
+	c2 := &HathClient{settings: s, stats: NewStats()}
+	reloaded, err := NewCacheHandler(c2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded.pruner.stop()
+	if reloaded.CacheCount() != 1 {
+		t.Fatalf("filesystem import lost after crash: %d", reloaded.CacheCount())
+	}
+	reloaded.savePersistent() // stale snapshot now says one
+	os.Remove(reloaded.LocalPath(f))
+	c3 := &HathClient{settings: s, stats: NewStats()}
+	reloadedAgain, err := NewCacheHandler(c3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloadedAgain.pruner.stop()
+	if reloadedAgain.CacheCount() != 0 {
+		t.Fatalf("deleted file resurrected after crash: %d", reloadedAgain.CacheCount())
+	}
+}
+
 func TestInitLogVariants(t *testing.T) {
 	dir := t.TempDir()
-	InitLog(true, false, dir)   // file logger
-	InitLog(false, true, "")    // stdout, no file
-	InitLog(true, false, "")    // stdout debug
+	InitLog(true, false, dir) // file logger
+	Info("caller probe")
+	_ = logger.Load().Sync()
+	logBytes, err := os.ReadFile(filepath.Join(dir, "log_all"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logText := string(logBytes)
+	if !strings.Contains(logText, "cache_startup_test.go") || strings.Contains(logText, "hath/log.go") {
+		t.Fatalf("wrapped logger lost real caller: %q", logText)
+	}
+	InitLog(false, true, "") // stdout, no file
+	InitLog(true, false, "") // stdout debug
 	Info("test info")
 	Debug("test debug")
 	Warn("test warn")

@@ -12,6 +12,7 @@ package hath
 // in a listener wrapper before requests reach the mux.
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/tls"
 	"fmt"
@@ -29,7 +30,7 @@ import (
 
 var (
 	fileIndexRe = regexp.MustCompile(`^\d+$`)
-	xresRe      = regexp.MustCompile(`^org|\d+$`)
+	xresRe      = regexp.MustCompile(`^(org|\d+)$`)
 	localNetRe  = regexp.MustCompile(`(?i)^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|::1|0:0:0:0:0:0:0:1|fc|fd)`)
 )
 
@@ -48,6 +49,7 @@ type HTTPServer struct {
 
 	httpServer *http.Server
 	listener   net.Listener
+	serveDone  chan error
 
 	floodMu sync.Mutex
 	flood   map[string]*floodEntry
@@ -80,7 +82,8 @@ func NewHTTPServer(s *Settings, cache *CacheHandler, rpc *ServerHandler, stats *
 // connectivity test passes).
 func (h *HTTPServer) AllowNormalConnections() { h.allowNormal.Store(true) }
 
-// Start binds the TLS listener and begins serving. Blocks until Shutdown.
+// Start binds synchronously, then begins serving. A successful return proves
+// the port is owned before the client sends client_start.
 func (h *HTTPServer) Start() error {
 	addr := ":" + strconv.Itoa(h.settings.ClientPort)
 	raw, err := net.Listen("tcp", addr)
@@ -93,14 +96,26 @@ func (h *HTTPServer) Start() error {
 	h.httpServer = &http.Server{
 		Handler:           http.HandlerFunc(h.handle),
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       time.Second,
+		MaxHeaderBytes:    10000,
 	}
-	return h.httpServer.Serve(&gatingListener{Listener: h.listener, server: h})
+	h.serveDone = make(chan error, 1)
+	go func() { h.serveDone <- h.httpServer.Serve(&gatingListener{Listener: h.listener, server: h}) }()
+	return nil
 }
 
-// Shutdown stops accepting new connections and closes in-flight handlers.
+// Done reports listener termination. Any error other than http.ErrServerClosed
+// is fatal after startup because the node is no longer serving.
+func (h *HTTPServer) Done() <-chan error { return h.serveDone }
+
+// Shutdown stops accepting new connections and waits for active handlers.
 func (h *HTTPServer) Shutdown() {
 	if h.httpServer != nil {
-		h.httpServer.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		if err := h.httpServer.Shutdown(ctx); err != nil {
+			_ = h.httpServer.Close()
+		}
 	}
 }
 
@@ -123,10 +138,20 @@ func (l *gatingListener) Accept() (net.Conn, error) {
 		if tc, ok := c.(*tls.Conn); ok {
 			// force the handshake so RemoteAddr/IP classification is stable and
 			// bad clients fail early, before we count them.
-			_ = tc.Handshake()
+			_ = tc.SetDeadline(time.Now().Add(10 * time.Second))
+			if err := tc.Handshake(); err != nil {
+				c.Close()
+				continue
+			}
+			_ = tc.SetDeadline(time.Time{})
 		}
 		if l.server.admit(c) {
-			return &trackedConn{Conn: c, server: l.server}, nil
+			host := stripV6(ipOf(c.RemoteAddr().String()))
+			open := l.server.openConns.Add(1)
+			if l.server.stats != nil {
+				l.server.stats.SetOpenConnections(int(open))
+			}
+			return &trackedConn{Conn: c, server: l.server, throttle: !l.server.isLocal(host), counted: true}, nil
 		}
 		c.Close()
 	}
@@ -145,7 +170,7 @@ func (h *HTTPServer) admit(c net.Conn) bool {
 	if !rpc && !local {
 		max := h.settings.MaxConnections()
 		open := h.openConns.Load()
-		if open > int64(max) {
+		if open >= int64(max) {
 			Warn("exceeded max incoming connections", "max", max)
 			return false
 		}
@@ -205,16 +230,20 @@ func (h *HTTPServer) isLocal(host string) bool {
 // non-local traffic.
 type trackedConn struct {
 	net.Conn
-	server *HTTPServer
+	server   *HTTPServer
 	throttle bool
-	counted bool
+	counted  bool
 }
 
 func (t *trackedConn) Write(p []byte) (int, error) {
 	if t.throttle && t.server.bwm != nil {
 		t.server.bwm.WaitForQuota(len(p))
 	}
-	return t.Conn.Write(p)
+	n, err := t.Conn.Write(p)
+	if t.server.stats != nil {
+		t.server.stats.BytesSent(int64(n))
+	}
+	return n, err
 }
 
 func (t *trackedConn) Read(b []byte) (int, error) {
@@ -241,6 +270,9 @@ func (t *trackedConn) Close() error {
 // --- request handling ---
 
 func (h *HTTPServer) handle(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Server", "Genetic Lifeform and Distributed Open Server "+ClientVer)
+	w.Header().Set("Connection", "close")
+	r.Close = true
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET,HEAD")
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -300,7 +332,7 @@ func (h *HTTPServer) handleFile(w http.ResponseWriter, r *http.Request, seg []st
 		if len(kp) == 2 {
 			if kt, err := strconv.ParseInt(kp[0], 10, 64); err == nil {
 				if abs64(h.settings.ServerTime()-kt) < keystampTolerance {
-					if kp[1] == keystampHash(kt, fileid, h.settings.ClientKey) {
+					if strings.EqualFold(kp[1], keystampHash(kt, fileid, h.settings.ClientKey)) {
 						keystampRejected = false
 					}
 				}
@@ -350,9 +382,8 @@ func (h *HTTPServer) serveCached(w http.ResponseWriter, r *http.Request, hvf *HV
 						Error("cache verify panicked; skipping", "fileid", hvf.Fileid(), "err", r)
 					}
 				}()
-				if !h.cache.VerifyFile(hvf) {
+				if h.cache.DeleteIfCorrupt(hvf) {
 					Warn("corrupt cached file; deleting", "fileid", hvf.Fileid())
-					h.cache.DeleteFileFromCache(hvf)
 				}
 			}()
 		} else {
@@ -362,22 +393,14 @@ func (h *HTTPServer) serveCached(w http.ResponseWriter, r *http.Request, hvf *HV
 		h.cache.MarkRecentlyAccessed(hvf)
 	}
 
-	fi, err := f.Stat()
-	if err != nil {
-		h.empty(w, http.StatusInternalServerError)
-		return
-	}
-
-	// Caddy-style static serving: hand the *os.File (an io.ReadSeeker) to
-	// http.ServeContent. On the disk->socket path this streams via sendfile(2)
-	// (zero-copy, no userspace buffer), honors Range requests (206 Partial
-	// Content) and conditional If-Modified-Since / If-None-Match (304), and
-	// sets Content-Length, Last-Modified and Accept-Ranges for us. The common
-	// case (a plain GET) is byte-for-byte identical to before.
 	w.Header().Set("Content-Type", hvf.Mime())
 	w.Header().Set("Cache-Control", "public, max-age=31536000")
+	w.Header().Set("Content-Length", strconv.FormatInt(hvf.Size, 10))
 	h.stats.FileSent()
-	http.ServeContent(w, r, hvf.Fileid(), fi.ModTime(), f)
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_, _ = io.CopyN(w, f, hvf.Size)
+	}
 	Info("served", "code", 200, "bytes", hvf.Size, "path", r.RequestURI)
 }
 
@@ -431,18 +454,14 @@ func (h *HTTPServer) proxyFile(w http.ResponseWriter, r *http.Request, hvf *HVFi
 	}
 	defer f.Close()
 
-	fi, err := f.Stat()
-	if err != nil {
-		h.empty(w, http.StatusInternalServerError)
-		return
-	}
-
-	// Serve via http.ServeContent for zero-copy sendfile + Range/conditional
-	// support, exactly like serveCached.
 	w.Header().Set("Content-Type", hvf.Mime())
 	w.Header().Set("Cache-Control", "public, max-age=31536000")
+	w.Header().Set("Content-Length", strconv.FormatInt(n, 10))
 	h.stats.FileSent()
-	http.ServeContent(w, r, hvf.Fileid(), fi.ModTime(), f)
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_, _ = io.CopyN(w, f, n)
+	}
 	// import verified copy into the cache (best-effort)
 	if h.cache.ImportFileToCache(tmpPath, hvf) {
 		Debug("proxy file imported to cache", "fileid", fileid)
@@ -463,7 +482,7 @@ func (h *HTTPServer) handleServerCmd(w http.ResponseWriter, r *http.Request, seg
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	cmd := seg[2]
+	cmd := strings.ToLower(seg[2])
 	add := seg[3]
 	t, err := strconv.ParseInt(seg[4], 10, 64)
 	if err != nil {
@@ -472,7 +491,7 @@ func (h *HTTPServer) handleServerCmd(w http.ResponseWriter, r *http.Request, seg
 	}
 	key := seg[5]
 	if abs64(h.settings.ServerTime()-t) > MaxKeyTimeDrift ||
-		servercmdKey(cmd, add, h.settings.ClientID, t, h.settings.ClientKey) != key {
+		!strings.EqualFold(servercmdKey(cmd, add, h.settings.ClientID, t, h.settings.ClientKey), key) {
 		Debug("servercmd bad/expired key")
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
@@ -615,7 +634,12 @@ func (h *HTTPServer) runThreadedProxyTest(w http.ResponseWriter, add string) {
 			}()
 			url := fmt.Sprintf("%s://%s:%s/t/%s/%s/%s/%d", protocol, hostname, port, testsize, testtime, testkey, randInt31())
 			start := time.Now()
-			resp, err := client.Get(url)
+			req, err := http.NewRequest(http.MethodGet, url, nil)
+			if err != nil {
+				return
+			}
+			setJavaRequestHeaders(req)
+			resp, err := client.Do(req)
 			if err != nil {
 				return
 			}

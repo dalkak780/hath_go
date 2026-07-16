@@ -1,6 +1,7 @@
 package hath
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -40,8 +41,8 @@ func TestCycleCertRefreshSuspendFails(t *testing.T) {
 	c.server = &HTTPServer{cert: c.cert, settings: s}
 	c.doCertRefresh = true
 	c.cycle()
-	if c.doCertRefresh {
-		t.Fatal("doCertRefresh should be cleared after cycle")
+	if !c.doCertRefresh {
+		t.Fatal("doCertRefresh should remain set for retry")
 	}
 }
 
@@ -69,8 +70,26 @@ func TestRefreshCertsCertLoadFails(t *testing.T) {
 	}
 	c.cert = cm
 	c.server = NewHTTPServer(s, nil, c.rpc, c.stats, cm, c)
+	oldServer := c.server
+	oldPFX, err := os.ReadFile(filepath.Join(s.DataDir, certFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldLeaf := c.cert.leaf
 	m.certBytes = nil // refresh fetch fails
-	c.refreshCerts()
+	if c.refreshCerts() {
+		t.Fatal("failed refresh must request retry")
+	}
+	newPFX, err := os.ReadFile(filepath.Join(s.DataDir, certFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(oldPFX, newPFX) {
+		t.Fatal("failed refresh replaced known-good PFX")
+	}
+	if c.server != oldServer || c.cert.leaf != oldLeaf {
+		t.Fatal("failed refresh replaced working TLS state")
+	}
 	if c.server != nil {
 		c.server.Shutdown()
 	}

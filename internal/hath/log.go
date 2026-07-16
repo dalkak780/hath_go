@@ -2,6 +2,7 @@ package hath
 
 import (
 	"os"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -10,15 +11,15 @@ import (
 // Out wraps the original Java Out.* logging on top of go.uber.org/zap.
 // zap is zero-allocation and level-gated, which matters here: the edge server
 // emits a log line per request. We keep the original method names.
-var logger *zap.SugaredLogger
+var logger atomic.Pointer[zap.SugaredLogger]
 
 func init() {
 	// Provide a usable default so callers (and tests) never hit a nil logger
 	// before InitLog runs. InitLog replaces it at startup.
-	if l, err := zap.NewDevelopment(); err == nil {
-		logger = l.Sugar()
+	if l, err := zap.NewDevelopment(zap.AddCallerSkip(1)); err == nil {
+		logger.Store(l.Sugar())
 	} else {
-		logger = zap.NewNop().Sugar()
+		logger.Store(zap.NewNop().Sugar())
 	}
 }
 
@@ -44,10 +45,12 @@ func InitLog(levelDebug, disableFile bool, logDir string) {
 
 	core := zapcore.NewCore(zapcore.NewConsoleEncoder(encCfg),
 		zapcore.NewMultiWriteSyncer(sinks...), level)
-	logger = zap.New(core, zap.AddCallerSkip(1)).Sugar()
+	// Log through the package-level helpers without losing the real call site.
+	// AddCaller enables the field; AddCallerSkip skips Info/Warn/Error/Debug.
+	logger.Store(zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1)).Sugar())
 }
 
-func Info(msg string, args ...any)  { logger.Infow(msg, args...) }
-func Warn(msg string, args ...any)  { logger.Warnw(msg, args...) }
-func Error(msg string, args ...any) { logger.Errorw(msg, args...) }
-func Debug(msg string, args ...any) { logger.Debugw(msg, args...) }
+func Info(msg string, args ...any)  { logger.Load().Infow(msg, args...) }
+func Warn(msg string, args ...any)  { logger.Load().Warnw(msg, args...) }
+func Error(msg string, args ...any) { logger.Load().Errorw(msg, args...) }
+func Debug(msg string, args ...any) { logger.Load().Debugw(msg, args...) }

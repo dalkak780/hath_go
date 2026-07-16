@@ -43,9 +43,10 @@ The Go client keeps the original Java client's protocol identity:
 - client version: `1.6.5`
 - client build: `178`
 
-`ClientBuild` is the H@H server compatibility level, not a Go build counter.
-GitHub releases use the corresponding `v1.6.5` tag, and release assets include
-that version in their filenames.
+`ClientBuild` and `ClientVer` are the H@H wire-compatibility identity. Go port
+releases keep that upstream version and add a port revision suffix: the first
+1.6.5 port release is `v1.6.5-go.1`, followed by `-go.2` as needed. An
+upstream Java 1.6.6 port starts again at `v1.6.6-go.1`.
 
 ## Configuration
 
@@ -106,7 +107,7 @@ services:
   hath:
     image: ${HATH_IMAGE:-ghcr.io/dalkak780/hath_go:latest}
     container_name: hath
-    # Keep this off during migration; enable after one clean startup.
+    # Keep this off until startup and an external TLS probe are verified.
     restart: "no"
     user: "${PUID:-65532}:${PGID:-65532}"
     environment:
@@ -142,8 +143,8 @@ names used by the old Compose project, or replace the volume entries with the
 old bind-mount paths:
 
 ```dotenv
-# Pin this to ghcr.io/dalkak780/hath_go:1.6.5 after the versioned release.
-HATH_IMAGE=ghcr.io/dalkak780/hath_go:latest
+# Canary release; keep restart disabled until startup and external TLS pass.
+HATH_IMAGE=ghcr.io/dalkak780/hath_go:1.6.5-go.1
 HATH_CLIENT_ID=12345
 HATH_CLIENT_KEY=your-20-character-client-key
 HATH_PORT=12345
@@ -164,8 +165,14 @@ docker compose down
 docker compose pull
 docker compose up -d
 docker compose logs -f hath
-# After a clean startup, change restart to: unless-stopped
 ```
+
+Do not enable automatic restart merely because the container remains running.
+First confirm the log contains `startup completed; normal operation`, then
+probe the published port from a different network and verify that a TLS
+handshake succeeds and `/robots.txt` returns HTTP 200. Only after both checks
+pass should you change `restart` to `unless-stopped`. If either check fails,
+stop the Go container and roll back to the preserved Java image and volumes.
 
 `--user`/Compose `user` controls the ownership of newly downloaded cache files;
 it does not repair existing ownership. If the old container used a custom
