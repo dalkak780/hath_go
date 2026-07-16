@@ -1,6 +1,6 @@
 # hath — Hentai@Home client in Go
 
-[![Release](https://img.shields.io/github/v/release/dalkak780/hath_go?include_prereleases&sort=semver&label=release)](https://github.com/dalkak780/hath_go/releases/latest)
+[![Release](https://img.shields.io/github/v/release/dalkak780/hath_go?include_prereleases&sort=semver&label=release)](https://github.com/dalkak780/hath_go/releases)
 [![Docker Hub](https://img.shields.io/docker/v/dalkak780/hath_go?sort=semver&label=Docker%20Hub)](https://hub.docker.com/r/dalkak780/hath_go/tags)
 [![GHCR](https://img.shields.io/github/v/release/dalkak780/hath_go?include_prereleases&sort=semver&label=GHCR)](https://github.com/dalkak780/hath_go/pkgs/container/hath_go)
 
