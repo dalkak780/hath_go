@@ -18,6 +18,9 @@ import (
 // changing them breaks compatibility (and, for auth-related ones, risks
 // account lockouts from malformed requests).
 const (
+	// Keep these in lockstep with hath_java's Settings.CLIENT_BUILD and
+	// Settings.CLIENT_VERSION. ClientBuild is the server compatibility level;
+	// do not increment it for Go-only releases.
 	ClientBuild  = 178
 	ClientVer    = "1.6.5"
 	ClientKeyLen = 20
@@ -154,5 +157,3 @@ func ParseHVFile(fileid string) *HVFile {
 	}
 	return f
 }
-
-

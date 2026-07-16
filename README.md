@@ -31,6 +31,17 @@ The original Java source is preserved under `hath_java/` for reference only.
 - `crypto/sha1` drives every auth signature.
 - Single static binary → minimal Docker image.
 
+## Version policy
+
+The Go client keeps the original Java client's protocol identity:
+
+- client version: `1.6.5`
+- client build: `178`
+
+`ClientBuild` is the H@H server compatibility level, not a Go build counter.
+GitHub releases use the corresponding `v1.6.5` tag, and release assets include
+that version in their filenames.
+
 ## Configuration
 
 Credentials are stored in `data/client_login` as `<ClientID>-<ClientKey>`.
