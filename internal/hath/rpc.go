@@ -66,6 +66,11 @@ type ServerHandler struct {
 	stats          *Stats
 	lastOverload   time.Time
 	loginValidated bool
+
+	originMu        sync.Mutex
+	directOrigin    *http.Client
+	proxiedOrigin   *http.Client
+	proxiedOriginID string
 }
 
 // NewServerHandler builds the RPC client. A single http.Client with keep-alives
@@ -506,18 +511,43 @@ func (h *ServerHandler) FetchQueue(add string) string {
 // originClient builds an HTTP client for fetching from origin servers / other
 // H@H nodes, honoring the optional image proxy (HTTP or SOCKS).
 func (h *ServerHandler) originClient(allowProxy bool) *http.Client {
-	c := &http.Client{Timeout: 5 * time.Minute, Transport: &http.Transport{DialContext: outboundDialContext}}
+	h.originMu.Lock()
+	defer h.originMu.Unlock()
+
 	if !allowProxy || h.settings.ImageProxyHost == "" {
+		if h.directOrigin == nil {
+			h.directOrigin = newOriginClient(h.settings, false)
+		}
+		return h.directOrigin
+	}
+
+	// Proxy settings normally never change after startup. Keeping the identity
+	// here also makes tests and future settings refreshes replace the client
+	// safely instead of retaining a transport configured for the old proxy.
+	id := fmt.Sprintf("%s\x00%s\x00%d", h.settings.ImageProxyType, h.settings.ImageProxyHost, imageProxyPortOrDefault(h.settings))
+	if h.proxiedOrigin == nil || h.proxiedOriginID != id {
+		if h.proxiedOrigin != nil {
+			h.proxiedOrigin.CloseIdleConnections()
+		}
+		h.proxiedOrigin = newOriginClient(h.settings, true)
+		h.proxiedOriginID = id
+	}
+	return h.proxiedOrigin
+}
+
+func newOriginClient(s *Settings, useProxy bool) *http.Client {
+	c := &http.Client{Timeout: 5 * time.Minute, Transport: &http.Transport{DialContext: outboundDialContext}}
+	if !useProxy {
 		return c
 	}
-	switch h.settings.ImageProxyType {
+	switch s.ImageProxyType {
 	case "http", "https":
-		proxyURL, err := url.Parse(fmt.Sprintf("http://%s:%d", h.settings.ImageProxyHost, imageProxyPortOrDefault(h.settings)))
+		proxyURL, err := url.Parse(fmt.Sprintf("http://%s:%d", s.ImageProxyHost, imageProxyPortOrDefault(s)))
 		if err == nil {
 			c.Transport = &http.Transport{Proxy: http.ProxyURL(proxyURL), DialContext: outboundDialContext}
 		}
 	case "socks":
-		dialer, err := proxy.SOCKS5("tcp", fmt.Sprintf("%s:%d", h.settings.ImageProxyHost, imageProxyPortOrDefault(h.settings)), nil, proxy.Direct)
+		dialer, err := proxy.SOCKS5("tcp", fmt.Sprintf("%s:%d", s.ImageProxyHost, imageProxyPortOrDefault(s)), nil, proxy.Direct)
 		if err == nil {
 			c.Transport = &http.Transport{Dial: dialer.Dial}
 		}

@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	_ "time/tzdata"
 
@@ -34,14 +35,22 @@ func main() {
 	s := hath.NewSettings()
 	s.ParseArgs(args)
 
-	// logging needs the log dir; honor a default before InitDirs resolves it.
-	hath.InitLog(debug, s.DisableLogs, s.LogDir)
 	hath.ApplyUmaskFromEnv()
 
 	if err := s.InitDirs(); err != nil {
 		fmt.Fprintln(os.Stderr, "could not create program directories:", err)
 		os.Exit(1)
 	}
+	disableFileLog := s.DisableLogs
+	if value, ok := os.LookupEnv("HATH_DISABLE_FILE_LOG"); ok {
+		var err error
+		disableFileLog, err = strconv.ParseBool(value)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "HATH_DISABLE_FILE_LOG must be true or false")
+			os.Exit(2)
+		}
+	}
+	hath.InitLog(debug, disableFileLog, s.LogDir)
 
 	hath.Info("Hentai@Home " + hath.ClientVer + " (build " + fmt.Sprint(hath.ClientBuild) + ") starting up")
 	hath.Info("Go port of Hentai@Home — GPL-3.0-or-later; original (c) E-Hentai.org / tenboro")

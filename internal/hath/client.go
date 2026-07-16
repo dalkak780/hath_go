@@ -34,6 +34,7 @@ type HathClient struct {
 	gallery         *GalleryDownloader
 	serverErr       chan error
 	startupComplete bool
+	shutdownOnce    sync.Once
 }
 
 // NewHathClient builds a client with the given settings/stats.
@@ -53,6 +54,8 @@ func (c *HathClient) TriggerCertRefresh() {
 
 // Run performs startup then the periodic loop until ctx is cancelled.
 func (c *HathClient) Run(ctx context.Context) error {
+	activeClient.Store(c)
+	defer activeClient.CompareAndSwap(c, nil)
 	c.stats.ResetStats()
 	c.stats.SetProgramStatus("Logging in to main server...")
 
@@ -123,6 +126,11 @@ func (c *HathClient) Run(ctx context.Context) error {
 	Info("startup completed; normal operation")
 
 	var lastThreadTime time.Duration
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer timer.Stop()
 	for !c.IsShuttingDown() {
 		select {
 		case <-cancelCtx.Done():
@@ -138,6 +146,7 @@ func (c *HathClient) Run(ctx context.Context) error {
 		if sleep < 1000 {
 			sleep = 1000
 		}
+		timer.Reset(sleep)
 		select {
 		case <-cancelCtx.Done():
 			c.doShutdown()
@@ -145,7 +154,7 @@ func (c *HathClient) Run(ctx context.Context) error {
 		case err := <-c.serverErr:
 			c.doShutdown()
 			return errf("HTTP listener terminated: %v", err)
-		case <-time.After(sleep):
+		case <-timer.C:
 		}
 
 		start := time.Now()
@@ -274,20 +283,22 @@ func (c *HathClient) refreshCerts() bool {
 }
 
 func (c *HathClient) doShutdown() {
-	c.requestShutdown()
-	Info("shutting down...")
-	if c.startupComplete {
-		c.rpc.NotifyStop()
-	}
-	if c.server != nil {
-		c.server.Shutdown()
-	}
-	if c.cache != nil && c.cache.pruner != nil {
-		c.cache.pruner.stop()
-	}
-	if c.cache != nil {
-		c.cache.TerminateCache()
-	}
+	c.shutdownOnce.Do(func() {
+		c.requestShutdown()
+		Info("shutting down...")
+		if c.startupComplete && c.rpc != nil {
+			c.rpc.NotifyStop()
+		}
+		if c.server != nil {
+			c.server.Shutdown()
+		}
+		if c.cache != nil && c.cache.pruner != nil {
+			c.cache.pruner.stop()
+		}
+		if c.cache != nil {
+			c.cache.TerminateCache()
+		}
+	})
 }
 
 func (c *HathClient) requestShutdown() {

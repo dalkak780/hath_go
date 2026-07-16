@@ -53,6 +53,8 @@ type HTTPServer struct {
 
 	floodMu sync.Mutex
 	flood   map[string]*floodEntry
+	proxyMu sync.Mutex
+	proxies map[string]*proxyFlight
 }
 
 // AllowNormalConnections permits non-RPC, non-local clients after the startup
@@ -65,6 +67,11 @@ type floodEntry struct {
 	blockedUntil time.Time
 }
 
+type proxyFlight struct {
+	done   chan struct{}
+	cached bool
+}
+
 // NewHTTPServer constructs the edge server.
 func NewHTTPServer(s *Settings, cache *CacheHandler, rpc *ServerHandler, stats *Stats, cert *CertManager, client *HathClient) *HTTPServer {
 	hs := &HTTPServer{
@@ -75,6 +82,7 @@ func NewHTTPServer(s *Settings, cache *CacheHandler, rpc *ServerHandler, stats *
 		cert:     cert,
 		client:   client,
 		flood:    make(map[string]*floodEntry),
+		proxies:  make(map[string]*proxyFlight),
 	}
 	if !s.DisableBWM {
 		hs.bwm = NewBandwidthMonitor(s.ThrottleBytes)
@@ -367,10 +375,11 @@ func (h *HTTPServer) handleFile(w http.ResponseWriter, r *http.Request, seg []st
 		h.serveCached(w, r, hvf)
 		return
 	}
-	h.proxyFile(w, r, hvf, fileindex, xres, fileid)
+	h.proxyFileCoalesced(w, r, hvf, fileindex, xres, fileid)
 }
 
 func (h *HTTPServer) serveCached(w http.ResponseWriter, r *http.Request, hvf *HVFile) {
+	started := time.Now()
 	path := h.cache.LocalPath(hvf)
 	f, err := os.Open(path)
 	if err != nil {
@@ -403,28 +412,70 @@ func (h *HTTPServer) serveCached(w http.ResponseWriter, r *http.Request, hvf *HV
 	w.Header().Set("Content-Type", hvf.Mime())
 	w.Header().Set("Cache-Control", "public, max-age=31536000")
 	w.Header().Set("Content-Length", strconv.FormatInt(hvf.Size, 10))
-	h.stats.FileSent()
 	w.WriteHeader(http.StatusOK)
-	if r.Method != http.MethodHead {
-		_, _ = io.CopyN(w, f, hvf.Size)
+	var sent int64
+	var writeErr error
+	if r.Method == http.MethodHead {
+		h.stats.FileSent()
+	} else {
+		sent, writeErr = io.CopyN(w, f, hvf.Size)
+		if writeErr == nil {
+			h.stats.FileSent()
+		}
 	}
-	Info("served", "code", 200, "bytes", hvf.Size, "path", r.RequestURI)
+	if writeErr != nil {
+		Debug("serve interrupted", "bytes", sent, "expected", hvf.Size, "duration", time.Since(started), "path", r.RequestURI, "err", writeErr)
+		return
+	}
+	Info("served", "code", 200, "bytes", sent, "expected", hvf.Size, "duration", time.Since(started), "path", r.RequestURI)
 }
 
 // proxyFile fetches a missing file from a server-suggested origin, streams it
 // to the client, and caches the verified result. When the origin is another
 // H@H node it is authenticated with the Hath-Request header.
-func (h *HTTPServer) proxyFile(w http.ResponseWriter, r *http.Request, hvf *HVFile, fileindex, xres, fileid string) {
+func (h *HTTPServer) proxyFileCoalesced(w http.ResponseWriter, r *http.Request, hvf *HVFile, fileindex, xres, fileid string) {
+	h.proxyMu.Lock()
+	if h.proxies == nil {
+		h.proxies = make(map[string]*proxyFlight)
+	}
+	if flight := h.proxies[fileid]; flight != nil {
+		h.proxyMu.Unlock()
+		select {
+		case <-flight.done:
+			if cached, ok := h.cache.Lookup(fileid); flight.cached && ok {
+				h.serveCached(w, r, cached)
+				return
+			}
+			h.empty(w, http.StatusBadGateway)
+		case <-r.Context().Done():
+		}
+		return
+	}
+	flight := &proxyFlight{done: make(chan struct{})}
+	h.proxies[fileid] = flight
+	h.proxyMu.Unlock()
+
+	defer func() {
+		h.proxyMu.Lock()
+		delete(h.proxies, fileid)
+		close(flight.done)
+		h.proxyMu.Unlock()
+	}()
+	flight.cached = h.proxyFile(w, r, hvf, fileindex, xres, fileid)
+}
+
+func (h *HTTPServer) proxyFile(w http.ResponseWriter, r *http.Request, hvf *HVFile, fileindex, xres, fileid string) bool {
+	started := time.Now()
 	sources := h.rpc.GetStaticRangeFetchURL(fileindex, xres, fileid)
 	if len(sources) == 0 {
 		h.empty(w, http.StatusNotFound)
-		return
+		return false
 	}
 	// fetch to a temp file first so we can verify SHA-1 before serving+importing
 	tmp, err := os.CreateTemp(h.settings.TempDir, "proxyfile_")
 	if err != nil {
 		h.empty(w, http.StatusBadGateway)
-		return
+		return false
 	}
 	tmpPath := tmp.Name()
 	tmp.Close()
@@ -433,7 +484,7 @@ func (h *HTTPServer) proxyFile(w http.ResponseWriter, r *http.Request, hvf *HVFi
 	var n int64
 	var chosen string
 	for _, src := range sources {
-		got, err := h.rpc.DownloadToFile(src, tmpPath, 60*time.Second, false, true, nil, fileid)
+		got, err := h.rpc.DownloadToFile(src, tmpPath, 60*time.Second, true, true, nil, fileid)
 		if err == nil && got == hvf.Size {
 			n = got
 			chosen = src
@@ -443,7 +494,7 @@ func (h *HTTPServer) proxyFile(w http.ResponseWriter, r *http.Request, hvf *HVFi
 	if chosen == "" {
 		os.Remove(tmpPath)
 		h.empty(w, http.StatusBadGateway)
-		return
+		return false
 	}
 
 	// verify integrity before exposing to the client
@@ -451,32 +502,44 @@ func (h *HTTPServer) proxyFile(w http.ResponseWriter, r *http.Request, hvf *HVFi
 		os.Remove(tmpPath)
 		Warn("proxy download corrupt; not serving", "fileid", fileid)
 		h.empty(w, http.StatusBadGateway)
-		return
+		return false
 	}
 
 	f, err := os.Open(tmpPath)
 	if err != nil {
 		h.empty(w, http.StatusInternalServerError)
-		return
+		return false
 	}
 	defer f.Close()
 
 	w.Header().Set("Content-Type", hvf.Mime())
 	w.Header().Set("Cache-Control", "public, max-age=31536000")
 	w.Header().Set("Content-Length", strconv.FormatInt(n, 10))
-	h.stats.FileSent()
 	w.WriteHeader(http.StatusOK)
-	if r.Method != http.MethodHead {
-		_, _ = io.CopyN(w, f, n)
+	var sent int64
+	var writeErr error
+	if r.Method == http.MethodHead {
+		h.stats.FileSent()
+	} else {
+		sent, writeErr = io.CopyN(w, f, n)
+		if writeErr == nil {
+			h.stats.FileSent()
+		}
 	}
 	// import verified copy into the cache (best-effort)
-	if h.cache.ImportFileToCache(tmpPath, hvf) {
+	cached := h.cache.ImportFileToCache(tmpPath, hvf)
+	if cached {
 		Debug("proxy file imported to cache", "fileid", fileid)
 	} else {
 		os.Remove(tmpPath)
 	}
 	_ = chosen
-	Info("proxied", "code", 200, "bytes", n, "path", r.RequestURI)
+	if writeErr != nil {
+		Debug("proxy response interrupted", "bytes", sent, "expected", n, "duration", time.Since(started), "path", r.RequestURI, "err", writeErr)
+		return cached
+	}
+	Info("proxied", "code", 200, "bytes", sent, "expected", n, "duration", time.Since(started), "path", r.RequestURI)
+	return cached
 }
 
 // handleServerCmd serves /servercmd/{cmd}/{add}/{time}/{key}.

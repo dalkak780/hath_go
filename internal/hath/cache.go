@@ -8,9 +8,7 @@ package hath
 // of the original bespoke layout.
 
 import (
-	"crypto/sha1"
 	"encoding/gob"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -170,33 +168,25 @@ func (c *CacheHandler) IsFileVerificationOnCooldown() bool {
 
 // VerifyFile checks the SHA-1 of a cached file against its id.
 func (c *CacheHandler) VerifyFile(f *HVFile) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.verifyFileLocked(f)
+	return validateFileSHA1(c.LocalPath(f), f.Hash)
 }
 
-func (c *CacheHandler) verifyFileLocked(f *HVFile) bool {
-	h := sha1.New()
-	fl, err := os.Open(c.LocalPath(f))
-	if err != nil {
-		return false
-	}
-	defer fl.Close()
-	if _, err := io.Copy(h, fl); err != nil {
-		return false
-	}
-	return hex.EncodeToString(h.Sum(nil)) == f.Hash
-}
-
-// DeleteIfCorrupt verifies and removes the same path under one lock, so a
-// concurrent import cannot be mistaken for the file that was checked.
+// DeleteIfCorrupt hashes without holding the cache-wide lock, then verifies
+// that the path still names the same file before deleting it.
 func (c *CacheHandler) DeleteIfCorrupt(f *HVFile) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.verifyFileLocked(f) {
+	path := c.LocalPath(f)
+	before, err := os.Stat(path)
+	if err != nil || validateFileSHA1(path, f.Hash) {
 		return false
 	}
-	if err := os.Remove(c.LocalPath(f)); err != nil {
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	after, err := os.Stat(path)
+	if err != nil || !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		return false
+	}
+	if err := os.Remove(path); err != nil {
 		return false
 	}
 	c.cacheCount--

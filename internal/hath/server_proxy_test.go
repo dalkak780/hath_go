@@ -6,9 +6,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 )
 
@@ -82,6 +84,58 @@ func TestProxyFileServesAndCaches(t *testing.T) {
 	}
 	if _, ok := cache.Lookup(fileid); !ok {
 		t.Fatal("proxied file should be imported to cache")
+	}
+}
+
+func TestProxyFileUsesConfiguredImageProxy(t *testing.T) {
+	content := []byte("through-image-proxy")
+	fileid := sha1HexOf(content) + "-" + strconv.Itoa(len(content)) + "-jpg"
+	var proxyUsed atomic.Bool
+	imageProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyUsed.Store(true)
+		if r.URL.Host != "origin.invalid" {
+			t.Errorf("proxy received host %q", r.URL.Host)
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+		_, _ = w.Write(content)
+	}))
+	defer imageProxy.Close()
+	proxyURL, _ := url.Parse(imageProxy.URL)
+	proxyPort, _ := strconv.Atoi(proxyURL.Port())
+
+	m, s, rpc := newMockRPC(t)
+	s.SetServerTime(1_700_000_000)
+	s.MaxAllowedFile = 1 << 30
+	s.ImageProxyType = "http"
+	s.ImageProxyHost = proxyURL.Hostname()
+	s.ImageProxyPort = proxyPort
+	dir := t.TempDir()
+	s.CacheDir, s.TempDir, s.DataDir = filepath.Join(dir, "cache"), filepath.Join(dir, "tmp"), filepath.Join(dir, "data")
+	for _, d := range []string{s.CacheDir, s.TempDir, s.DataDir} {
+		_ = os.MkdirAll(d, 0o755)
+	}
+	client := NewHathClient(s, NewStats())
+	client.rpc = rpc
+	cache, err := NewCacheHandler(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cache.pruner.stop)
+	client.cache = cache
+	hs := NewHTTPServer(s, cache, rpc, client.stats, &CertManager{settings: s}, client)
+	hs.AllowNormalConnections()
+	srv := httptest.NewServer(http.HandlerFunc(hs.handle))
+	defer srv.Close()
+	m.setResponse(ActStaticRangeFetch, "OK\nhttp://origin.invalid/h/x\n")
+
+	resp, err := http.Get(srv.URL + validHTarget(s, fileid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || string(body) != string(content) || !proxyUsed.Load() {
+		t.Fatalf("image proxy parity failed: status=%d body=%q proxyUsed=%v", resp.StatusCode, body, proxyUsed.Load())
 	}
 }
 
