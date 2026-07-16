@@ -51,6 +51,12 @@ func main() {
 		}
 	}
 	hath.InitLog(debug, disableFileLog, s.LogDir)
+	stopPprof, err := hath.StartPprof(os.Getenv("HATH_PPROF_ADDR"))
+	if err != nil {
+		hath.Error("could not start pprof diagnostics", "err", err)
+		os.Exit(1)
+	}
+	defer stopPprof()
 
 	hath.Info("Hentai@Home " + hath.ClientVer + " (build " + fmt.Sprint(hath.ClientBuild) + ") starting up")
 	hath.Info("Go port of Hentai@Home — GPL-3.0-or-later; original (c) E-Hentai.org / tenboro")

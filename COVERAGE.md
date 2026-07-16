@@ -46,8 +46,8 @@ The remaining ~13% is **testable-but-low-value defensive code**, not untestable 
   impractical to drive in a unit test);
 - a few long-sleep production paths (cert refresh, gallery suspend).
 
-Cross-checking these against a live Java instance via `tools/captureproxy`
-remains the authoritative validation for the network behavior.
+Cross-checking these against a live Java instance remains outside the
+automated test suite.
 
 ## Pushing the gate higher
 

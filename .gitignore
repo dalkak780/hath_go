@@ -30,3 +30,6 @@ rpc.pcap
 *.pcap
 cover.out
 cover.raw
+
+# local agent working notes (not public documentation)
+/.agent-notes/

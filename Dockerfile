@@ -15,7 +15,10 @@ COPY . .
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags='-s -w -buildid=' \
-    -o /out/hath ./cmd/hath
+    -o /out/hath ./cmd/hath && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags='-s -w -buildid=' \
+    -o /out/hathmon ./cmd/hathmon
 
 # Keep writable runtime directories in the image without bringing any build
 # tools or source files into the final image.
@@ -33,6 +36,7 @@ ENV TZ=UTC \
 WORKDIR /hath
 
 COPY --from=build --chown=65532:65532 /out/hath /usr/local/bin/hath
+COPY --from=build --chown=65532:65532 /out/hathmon /usr/local/bin/hathmon
 COPY --from=build --chown=65532:65532 /runtime/hath/ /hath/
 
 USER 65532:65532

@@ -12,7 +12,7 @@ PKG     := ./internal/hath
 GATE             := 85
 COVERAGE_EXCLUDE := lifecycle.go log.go
 
-.PHONY: all build test vet cover gate ci dist clean
+.PHONY: all build test vet cover gate ci clean
 
 all: build
 
@@ -49,16 +49,6 @@ gate:
 
 # Full CI sequence.
 ci: vet test gate
-
-# Cross-compile tools for Linux (amd64 + arm64).
-dist:
-	rm -rf dist && mkdir dist
-	for arch in amd64 arm64; do \
-	  for tool in captureproxy rpcverify pfxinspect; do \
-	    GOOS=linux GOARCH=$$arch CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o dist/$$tool-linux-$$arch ./tools/$$tool; \
-	  done; \
-	done; \
-	ls -lh dist/
 
 clean:
 	rm -f cover.out cover.raw cover.html

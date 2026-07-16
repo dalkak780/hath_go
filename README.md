@@ -36,7 +36,7 @@ Create `compose.yaml`:
 ```yaml
 services:
   hath:
-    image: ghcr.io/dalkak780/hath_go:1.6.5-go.3
+    image: ghcr.io/dalkak780/hath_go:latest
     container_name: hath
     restart: unless-stopped
     user: "${PUID:-65532}:${PGID:-65532}"
@@ -140,6 +140,58 @@ Set it to `false` or omit it if `/hath/log/log_all` is required. This variable
 never suppresses stdout or per-request `served` messages. The legacy
 `--disable-logging=true` argument remains supported for Java compatibility,
 but `HATH_DISABLE_FILE_LOG` is recommended because its scope is unambiguous.
+
+## Optional long-term monitoring
+
+The image also contains `hathmon`, a lightweight sidecar that records Linux
+process metrics and periodically captures Go CPU and heap profiles. It needs
+neither Docker socket access nor Prometheus.
+
+Enable the private pprof listener on the main service and add the sidecar:
+
+```yaml
+services:
+  hath:
+    image: dalkak780/hath_go:latest
+    environment:
+      HATH_PPROF_ADDR: "127.0.0.1:6060"
+    # Keep the existing ports, volumes, credentials, and other settings.
+
+  hath-monitor:
+    image: dalkak780/hath_go:latest
+    entrypoint: ["/usr/local/bin/hathmon"]
+    user: "${PUID:-65532}:${PGID:-65532}"
+    pid: "service:hath"
+    network_mode: "service:hath"
+    depends_on:
+      - hath
+    environment:
+      HATHMON_OUTPUT_DIR: /profiles
+      HATHMON_INTERVAL: 1m
+      HATHMON_HEAP_INTERVAL: 1h
+      HATHMON_CPU_INTERVAL: 6h
+      HATHMON_CPU_DURATION: 1m
+      HATHMON_RETENTION: 168h
+    volumes:
+      - ./hath-profile:/profiles
+    restart: unless-stopped
+```
+
+`pid: service:hath` exposes the H@H process through the sidecar's `/proc/1`.
+`network_mode: service:hath` shares loopback so the sidecar can reach pprof at
+`127.0.0.1:6060`; it does not inherit files or environment variables.
+
+The sidecar writes daily `metrics-*.jsonl` files and timestamped
+`heap-*.pprof` and `cpu-*.pprof` profiles. Files older than the configured
+retention period are removed. Analyze profiles on a machine with Go installed:
+
+```bash
+go tool pprof -http=127.0.0.1:8081 hath-profile/cpu-YYYYMMDD-HHMMSS.pprof
+go tool pprof -http=127.0.0.1:8081 hath-profile/heap-YYYYMMDD-HHMMSS.pprof
+```
+
+Keep `HATH_PPROF_ADDR` on loopback inside the shared network namespace. Never
+publish the pprof port publicly.
 
 ## Credentials and configuration
 
