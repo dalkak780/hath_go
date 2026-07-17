@@ -418,6 +418,8 @@ func (h *HTTPServer) serveCached(w http.ResponseWriter, r *http.Request, hvf *HV
 	if r.Method == http.MethodHead {
 		h.stats.FileSent()
 	} else {
+		// Keep io.CopyN: net/http reuses its internal copy buffer for TLS responses.
+		// Avoid a custom buffer pool unless allocation profiles show a regression.
 		sent, writeErr = io.CopyN(w, f, hvf.Size)
 		if writeErr == nil {
 			h.stats.FileSent()
@@ -521,6 +523,8 @@ func (h *HTTPServer) proxyFile(w http.ResponseWriter, r *http.Request, hvf *HVFi
 	if r.Method == http.MethodHead {
 		h.stats.FileSent()
 	} else {
+		// Keep io.CopyN: net/http reuses its internal copy buffer for TLS responses.
+		// Avoid a custom buffer pool unless allocation profiles show a regression.
 		sent, writeErr = io.CopyN(w, f, n)
 		if writeErr == nil {
 			h.stats.FileSent()
