@@ -15,6 +15,23 @@ import (
 // emits a log line per request. We keep the original method names.
 var logger atomic.Pointer[zap.SugaredLogger]
 
+func humanBytes(n int64) string {
+	const unit = int64(1024)
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+
+	value := float64(n)
+	units := []string{"KiB", "MiB", "GiB", "TiB"}
+	for _, unit := range units {
+		value /= 1024
+		if value < 1024 || unit == units[len(units)-1] {
+			return fmt.Sprintf("%.1f %s", value, unit)
+		}
+	}
+	return fmt.Sprintf("%d B", n)
+}
+
 const (
 	logMaxBytes = int64(64 << 20)
 	logBackups  = 3
