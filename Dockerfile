@@ -31,6 +31,10 @@ RUN mkdir -p /runtime/hath/data /runtime/hath/cache /runtime/hath/log \
 # payload and can be changed at runtime: docker run -e TZ=Asia/Seoul ...
 FROM gcr.io/distroless/static-debian12:nonroot
 
+LABEL org.opencontainers.image.source="https://github.com/dalkak780/hath_go" \
+      org.opencontainers.image.description="Go reimplementation of the Hentai@Home distributed CDN client." \
+      org.opencontainers.image.licenses="GPL-3.0-or-later"
+
 ENV TZ=UTC \
     UMASK=022
 WORKDIR /hath
